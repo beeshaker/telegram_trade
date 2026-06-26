@@ -39,6 +39,8 @@ def parse_epics() -> list[str]:
     if multi:
         return [e.strip() for e in multi.split(",") if e.strip()]
     return [os.getenv("CAPITAL_EPIC", "US100")]
+
+
 UTC = ZoneInfo("UTC")
 
 settings = get_settings()
