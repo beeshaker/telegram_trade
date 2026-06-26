@@ -1,6 +1,6 @@
 import os
 import sys
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -22,6 +22,7 @@ from app.paper.auto_paper import (
     is_stopped_today,
     losses_today_count,
     monitor_trades,
+    stop_trading_today,
     trades_today_count,
 )
 from app.risk.risk_manager import RiskManager
@@ -30,15 +31,29 @@ from app.strategy.sweep_detector import detect_sweep
 
 load_dotenv()
 
-NY = ZoneInfo("America/New_York")
 UTC = ZoneInfo("UTC")
+
+SESSION_CONFIG = {
+    "US100":      {"tz": "America/New_York", "range_short": (time(9,30),  time(9,45)),  "range_long": (time(9,30),  time(10,0)),  "trade_start": time(9,45),  "trade_end": time(10,30), "session_name": "NY Open"},
+    "NATURALGAS": {"tz": "America/New_York", "range_short": (time(9,30),  time(9,45)),  "range_long": (time(9,30),  time(10,0)),  "trade_start": time(9,45),  "trade_end": time(10,30), "session_name": "NY Open"},
+    "UK100":      {"tz": "Europe/London",    "range_short": (time(8,0),   time(8,15)),  "range_long": (time(8,0),   time(8,30)),  "trade_start": time(8,15),  "trade_end": time(9,0),   "session_name": "London"},
+    "GOLD":       {"tz": "Europe/London",    "range_short": (time(8,0),   time(8,15)),  "range_long": (time(8,0),   time(8,30)),  "trade_start": time(8,15),  "trade_end": time(9,0),   "session_name": "London"},
+    "USDJPY":     {"tz": "Asia/Tokyo",       "range_short": (time(9,0),   time(9,15)),  "range_long": (time(9,0),   time(9,30)),  "trade_start": time(9,15),  "trade_end": time(10,0),  "session_name": "Tokyo"},
+}
+
+
+def parse_epics() -> list[str]:
+    multi = os.getenv("CAPITAL_EPICS", "")
+    if multi:
+        return [e.strip() for e in multi.split(",") if e.strip()]
+    return [os.getenv("CAPITAL_EPIC", "US100")]
 
 
 def send(msg: str):
     TelegramAlert().send_message(msg)
 
 
-def ny_to_utc_naive(dt):
+def local_to_utc_naive(dt):
     return dt.astimezone(UTC).replace(tzinfo=None)
 
 
@@ -144,157 +159,171 @@ def notify_trade_event(event):
 
 
 def main():
-    symbol = os.getenv("CAPITAL_EPIC", "US100")
     risk_percent = float(os.getenv("RISK_PER_TRADE_PERCENT", "0.5"))
     max_trades_per_day = int(os.getenv("MAX_TRADES_PER_DAY", "1"))
     max_losses_per_day = int(os.getenv("MAX_LOSSES_PER_DAY", "2"))
     sweep_buffer = float(os.getenv("SWEEP_BUFFER_POINTS", "0"))
     stop_buffer = float(os.getenv("STOP_BUFFER_POINTS", "2"))
 
+    epics = parse_epics()
     db = SessionLocal()
 
     try:
         account = ensure_paper_account(db)
-        latest_candle = get_latest_candle(db, symbol)
-        latest_price = get_latest_price(db, symbol)
 
-        if not latest_candle or latest_price is None:
-            print("No latest candle/price available.")
-            return
-
-        # Always monitor existing trades first.
-        events = monitor_trades(db, symbol, latest_price)
-        for event in events:
-            notify_trade_event(event)
-
-        latest_utc = latest_candle.candle_time.replace(tzinfo=UTC)
-        latest_ny = latest_utc.astimezone(NY)
-        session_date = latest_ny.date()
-
-        print("Latest NY time:", latest_ny.strftime("%Y-%m-%d %H:%M:%S %Z"))
-        print("Latest price:", latest_price)
-        print("Paper balance:", float(account.balance))
-
-        if is_paused(db):
-            print("Trading paused. Monitoring only.")
-            return
-
-        if is_stopped_today(db):
-            print("Trading stopped for today. Monitoring only.")
-            return
-
-        if get_open_trades(db):
-            print("Open/pending trade exists. No new trade.")
-            return
-
-        if trades_today_count(db) >= max_trades_per_day:
-            print("Max trades per day reached.")
-            return
-
-        if losses_today_count(db) >= max_losses_per_day:
-            print("Max losses per day reached.")
-            send("🛑 <b>Daily Risk Limit Hit</b>\n\nNo more AUTO_PAPER trades today.")
-            return
-
-        if latest_ny.time() < time(9, 45):
-            print("Before 09:45 NY. Strategy not active yet.")
-            return
-
-        if latest_ny.time() > time(10, 30):
-            print("After 10:30 NY. No new trades.")
-            return
-
-        overnight_start_ny = datetime.combine(session_date - timedelta(days=1), time(18, 0), tzinfo=NY)
-        overnight_end_ny = datetime.combine(session_date, time(9, 30), tzinfo=NY)
-        overnight = get_range(db, symbol, "M1", ny_to_utc_naive(overnight_start_ny), ny_to_utc_naive(overnight_end_ny))
-
-        if latest_ny.time() >= time(10, 0):
-            range_start_ny = datetime.combine(session_date, time(9, 30), tzinfo=NY)
-            range_end_ny = datetime.combine(session_date, time(10, 0), tzinfo=NY)
-            range_name = "30-min opening range"
-        else:
-            range_start_ny = datetime.combine(session_date, time(9, 30), tzinfo=NY)
-            range_end_ny = datetime.combine(session_date, time(9, 45), tzinfo=NY)
-            range_name = "15-min opening range"
-
-        opening_range = get_range(db, symbol, "M1", ny_to_utc_naive(range_start_ny), ny_to_utc_naive(range_end_ny))
-        if not opening_range:
-            print("Opening range not ready.")
-            return
-
-        scan_start_utc = ny_to_utc_naive(range_end_ny)
-        scan_end_utc = latest_candle.candle_time
-        candles = get_candles(db, symbol, "M5", scan_start_utc, scan_end_utc)
-
-        if len(candles) < 5:
-            print("Not enough M5 candles to scan.")
-            return
-
-        found = None
-        for i, candle in enumerate(candles):
-            sweep = detect_sweep(candle, opening_range["high"], opening_range["low"], buffer=sweep_buffer)
-            if not sweep:
+        for epic in epics:
+            cfg = SESSION_CONFIG.get(epic)
+            if cfg is None:
+                print(f"No SESSION_CONFIG for {epic}, skipping.")
                 continue
 
-            for j in range(max(i + 2, 2), len(candles)):
-                fvg = detect_fvg_at(candles, j)
-                if fvg and fvg.direction == sweep.direction:
-                    found = (sweep, fvg, candles[j])
+            TZ = ZoneInfo(cfg["tz"])
+
+            latest_candle = get_latest_candle(db, epic)
+            latest_price = get_latest_price(db, epic)
+
+            if not latest_candle or latest_price is None:
+                print(f"[{epic}] No latest candle/price. Skipping.")
+                continue
+
+            events = monitor_trades(db, epic, latest_price)
+            for event in events:
+                notify_trade_event(event)
+
+            latest_utc = latest_candle.candle_time.replace(tzinfo=UTC)
+            latest_local = latest_utc.astimezone(TZ)
+            session_date = latest_local.date()
+
+            print(f"[{epic}] Latest local time: {latest_local.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+            print(f"[{epic}] Latest price: {latest_price}")
+            print(f"[{epic}] Paper balance: {float(account.balance)}")
+
+            if is_paused(db):
+                print(f"[{epic}] Trading paused. Monitoring only.")
+                continue
+
+            if is_stopped_today(db, epic):
+                print(f"[{epic}] Stopped for today. Monitoring only.")
+                continue
+
+            if get_open_trades(db, epic):
+                print(f"[{epic}] Open/pending trade exists. No new trade.")
+                continue
+
+            if trades_today_count(db, epic) >= max_trades_per_day:
+                print(f"[{epic}] Max trades per day reached.")
+                continue
+
+            if losses_today_count(db, epic) >= max_losses_per_day:
+                print(f"[{epic}] Max losses per day reached.")
+                stop_trading_today(db, epic)
+                send(f"🛑 <b>Daily Risk Limit Hit ({epic})</b>\n\nNo more AUTO_PAPER trades today for {epic}.")
+                continue
+
+            trade_start = cfg["trade_start"]
+            trade_end = cfg["trade_end"]
+            range_short_start, range_short_end = cfg["range_short"]
+            range_long_start, range_long_end = cfg["range_long"]
+
+            if latest_local.time() < trade_start:
+                print(f"[{epic}] Before {trade_start}. Strategy not active yet.")
+                continue
+
+            if latest_local.time() > trade_end:
+                print(f"[{epic}] After {trade_end}. No new trades.")
+                continue
+
+            # Overnight range: 18:00 previous day → opening range start (in epic's TZ)
+            overnight_start_local = datetime.combine(session_date - timedelta(days=1), time(18, 0), tzinfo=TZ)
+            overnight_end_local = datetime.combine(session_date, range_short_start, tzinfo=TZ)
+            overnight = get_range(db, epic, "M1", local_to_utc_naive(overnight_start_local), local_to_utc_naive(overnight_end_local))
+
+            # Opening range: short (15-min) or long (30-min) depending on current time
+            if latest_local.time() >= range_long_end:
+                range_start_local = datetime.combine(session_date, range_long_start, tzinfo=TZ)
+                range_end_local = datetime.combine(session_date, range_long_end, tzinfo=TZ)
+                range_name = "30-min opening range"
+            else:
+                range_start_local = datetime.combine(session_date, range_short_start, tzinfo=TZ)
+                range_end_local = datetime.combine(session_date, range_short_end, tzinfo=TZ)
+                range_name = "15-min opening range"
+
+            opening_range = get_range(db, epic, "M1", local_to_utc_naive(range_start_local), local_to_utc_naive(range_end_local))
+            if not opening_range:
+                print(f"[{epic}] Opening range not ready.")
+                continue
+
+            scan_start_utc = local_to_utc_naive(range_end_local)
+            scan_end_utc = latest_candle.candle_time
+            candles = get_candles(db, epic, "M5", scan_start_utc, scan_end_utc)
+
+            if len(candles) < 5:
+                print(f"[{epic}] Not enough M5 candles to scan.")
+                continue
+
+            found = None
+            for i, candle in enumerate(candles):
+                sweep = detect_sweep(candle, opening_range["high"], opening_range["low"], buffer=sweep_buffer)
+                if not sweep:
+                    continue
+                for j in range(max(i + 2, 2), len(candles)):
+                    fvg = detect_fvg_at(candles, j)
+                    if fvg and fvg.direction == sweep.direction:
+                        found = (sweep, fvg, candles[j])
+                        break
+                if found:
                     break
 
-            if found:
-                break
+            if not found:
+                print(f"[{epic}] No sweep + FVG setup found.")
+                continue
 
-        if not found:
-            print("No sweep + FVG setup found.")
-            return
+            sweep, fvg, fvg_candle = found
+            plan = RiskManager().build_trade_plan(epic, sweep.direction, fvg.midpoint, sweep.sweep_price, buffer=stop_buffer)
 
-        sweep, fvg, fvg_candle = found
-        plan = RiskManager().build_trade_plan(symbol, sweep.direction, fvg.midpoint, sweep.sweep_price, buffer=stop_buffer)
-
-        existing_signal = (
-            db.query(Signal)
-            .filter(
-                Signal.symbol == symbol,
-                Signal.direction == sweep.direction,
-                Signal.signal_time == fvg_candle["candle_time"],
-                Signal.setup_type == f"NY Open Sweep + FVG AUTO_PAPER ({range_name})",
+            existing_signal = (
+                db.query(Signal)
+                .filter(
+                    Signal.symbol == epic,
+                    Signal.direction == sweep.direction,
+                    Signal.signal_time == fvg_candle["candle_time"],
+                    Signal.setup_type == f"NY Open Sweep + FVG AUTO_PAPER ({range_name})",
+                )
+                .first()
             )
-            .first()
-        )
 
-        if existing_signal:
-            print("Signal already exists. No duplicate.")
-            return
+            if existing_signal:
+                print(f"[{epic}] Signal already exists. No duplicate.")
+                continue
 
-        signal = Signal(
-            symbol=symbol,
-            signal_time=fvg_candle["candle_time"],
-            direction=sweep.direction,
-            setup_type=f"NY Open Sweep + FVG AUTO_PAPER ({range_name})",
-            status="DETECTED",
-            session_high=overnight["high"] if overnight else None,
-            session_low=overnight["low"] if overnight else None,
-            opening_range_high=opening_range["high"],
-            opening_range_low=opening_range["low"],
-            sweep_level=sweep.sweep_level,
-            sweep_price=sweep.sweep_price,
-            fvg_low=fvg.fvg_low,
-            fvg_high=fvg.fvg_high,
-            entry_price=plan.entry_price,
-            stop_loss=plan.stop_loss,
-            take_profit=plan.take_profit,
-            risk_reward=plan.risk_reward,
-            mode="AUTO_PAPER",
-        )
-        db.add(signal)
-        db.commit()
-        db.refresh(signal)
+            signal = Signal(
+                symbol=epic,
+                signal_time=fvg_candle["candle_time"],
+                direction=sweep.direction,
+                setup_type=f"NY Open Sweep + FVG AUTO_PAPER ({range_name})",
+                status="DETECTED",
+                session_high=overnight["high"] if overnight else None,
+                session_low=overnight["low"] if overnight else None,
+                opening_range_high=opening_range["high"],
+                opening_range_low=opening_range["low"],
+                sweep_level=sweep.sweep_level,
+                sweep_price=sweep.sweep_price,
+                fvg_low=fvg.fvg_low,
+                fvg_high=fvg.fvg_high,
+                entry_price=plan.entry_price,
+                stop_loss=plan.stop_loss,
+                take_profit=plan.take_profit,
+                risk_reward=plan.risk_reward,
+                mode="AUTO_PAPER",
+            )
+            db.add(signal)
+            db.commit()
+            db.refresh(signal)
 
-        trade = create_trade_from_signal(db, signal, risk_percent)
-        account = ensure_paper_account(db)
-        notify_trade_created(signal, trade, account)
-        print("Auto paper trade created.")
+            trade = create_trade_from_signal(db, signal, risk_percent)
+            account = ensure_paper_account(db)
+            notify_trade_created(signal, trade, account)
+            print(f"[{epic}] Auto paper trade created.")
 
     finally:
         db.close()
