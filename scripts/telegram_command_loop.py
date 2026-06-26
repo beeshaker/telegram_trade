@@ -23,6 +23,7 @@ from app.paper.auto_paper import (
     get_open_trades,
     is_paused,
     is_stopped_today,
+    losses_today_count,
     reset_paper_account,
     set_paused,
     stop_trading_today,
@@ -31,6 +32,13 @@ from app.paper.auto_paper import (
 
 load_dotenv()
 NY = ZoneInfo("America/New_York")
+
+
+def parse_epics() -> list[str]:
+    multi = os.getenv("CAPITAL_EPICS", "")
+    if multi:
+        return [e.strip() for e in multi.split(",") if e.strip()]
+    return [os.getenv("CAPITAL_EPIC", "US100")]
 UTC = ZoneInfo("UTC")
 
 settings = get_settings()
@@ -102,28 +110,37 @@ def levels_text(db, symbol):
 
 
 def status_text(db):
-    symbol = os.getenv("CAPITAL_EPIC", "US100")
+    epics = parse_epics()
     account = ensure_paper_account(db)
-    latest = get_latest_candle(db, symbol)
-    open_trades = get_open_trades(db)
+    paused = is_paused(db)
 
-    latest_text = "No candle"
-    if latest:
-        latest_utc = latest.candle_time.replace(tzinfo=UTC)
-        latest_ny = latest_utc.astimezone(NY)
-        latest_text = latest_ny.strftime("%Y-%m-%d %H:%M:%S %Z")
+    EPIC_DISPLAY = {
+        "NATURALGAS": "NATGAS",
+    }
+    SESSION_DISPLAY = {
+        "US100": "NY Open",
+        "NATURALGAS": "NY Open",
+        "UK100": "London",
+        "GOLD": "London",
+        "USDJPY": "Tokyo",
+    }
 
-    return (
-        f"🤖 <b>Bot Status</b>\n\n"
-        f"<b>Mode:</b> AUTO_PAPER\n"
-        f"<b>Symbol:</b> {symbol}\n"
-        f"<b>Paused:</b> {is_paused(db)}\n"
-        f"<b>Stopped today:</b> {is_stopped_today(db)}\n"
-        f"<b>Latest candle NY:</b> {latest_text}\n"
-        f"<b>Open/pending trades:</b> {len(open_trades)}\n"
-        f"<b>Trades today:</b> {trades_today_count(db)}\n"
-        f"<b>Paper balance:</b> ${float(account.balance):.2f}"
-    )
+    lines = [
+        "🤖 <b>Bot Status</b>",
+        "",
+        f"Balance: ${float(account.balance):.2f}",
+        f"Mode: AUTO_PAPER | Paused: {paused}",
+        "",
+    ]
+
+    for epic in epics:
+        display = EPIC_DISPLAY.get(epic, epic)
+        session = SESSION_DISPLAY.get(epic, "")
+        t = trades_today_count(db, epic)
+        l = losses_today_count(db, epic)
+        lines.append(f"{display:<8} | {session:<10} | Trades: {t} | Losses: {l}")
+
+    return "\n".join(lines)
 
 
 def open_trades_text(db):
