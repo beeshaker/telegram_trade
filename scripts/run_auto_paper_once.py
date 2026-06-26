@@ -1,6 +1,6 @@
 import os
 import sys
-from datetime import date, datetime, time, timedelta
+from datetime import datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -202,7 +202,7 @@ def main():
                 print(f"[{epic}] Trading paused. Monitoring only.")
                 continue
 
-            if is_stopped_today(db, epic):
+            if is_stopped_today(db) or is_stopped_today(db, epic):
                 print(f"[{epic}] Stopped for today. Monitoring only.")
                 continue
 
@@ -287,7 +287,7 @@ def main():
                     Signal.symbol == epic,
                     Signal.direction == sweep.direction,
                     Signal.signal_time == fvg_candle["candle_time"],
-                    Signal.setup_type == f"NY Open Sweep + FVG AUTO_PAPER ({range_name})",
+                    Signal.setup_type == f"{cfg['session_name']} Sweep + FVG AUTO_PAPER ({range_name})",
                 )
                 .first()
             )
@@ -300,7 +300,7 @@ def main():
                 symbol=epic,
                 signal_time=fvg_candle["candle_time"],
                 direction=sweep.direction,
-                setup_type=f"NY Open Sweep + FVG AUTO_PAPER ({range_name})",
+                setup_type=f"{cfg['session_name']} Sweep + FVG AUTO_PAPER ({range_name})",
                 status="DETECTED",
                 session_high=overnight["high"] if overnight else None,
                 session_low=overnight["low"] if overnight else None,
