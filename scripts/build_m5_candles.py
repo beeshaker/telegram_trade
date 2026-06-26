@@ -14,6 +14,13 @@ from app.models import Candle
 load_dotenv()
 
 
+def parse_epics() -> list[str]:
+    multi = os.getenv("CAPITAL_EPICS", "")
+    if multi:
+        return [e.strip() for e in multi.split(",") if e.strip()]
+    return [os.getenv("CAPITAL_EPIC", "US100")]
+
+
 def upsert_candle(db, symbol: str, timeframe: str, candle_time, row):
     existing = (
         db.query(Candle)
@@ -51,87 +58,87 @@ def upsert_candle(db, symbol: str, timeframe: str, candle_time, row):
 
 
 def main():
-    symbol = os.getenv("CAPITAL_EPIC", "US100")
-
+    symbols = parse_epics()
     db = SessionLocal()
 
     try:
-        candles = (
-            db.query(Candle)
-            .filter(
-                Candle.symbol == symbol,
-                Candle.timeframe == "M1",
-            )
-            .order_by(Candle.candle_time.asc())
-            .all()
-        )
-
-        if not candles:
-            print(f"No M1 candles found for {symbol}")
-            return
-
-        rows = []
-
-        for c in candles:
-            rows.append(
-                {
-                    "time": c.candle_time,
-                    "open": float(c.open),
-                    "high": float(c.high),
-                    "low": float(c.low),
-                    "close": float(c.close),
-                    "volume": float(c.volume or 0),
-                }
+        for symbol in symbols:
+            candles = (
+                db.query(Candle)
+                .filter(
+                    Candle.symbol == symbol,
+                    Candle.timeframe == "M1",
+                )
+                .order_by(Candle.candle_time.asc())
+                .all()
             )
 
-        df = pd.DataFrame(rows)
-        df["time"] = pd.to_datetime(df["time"])
-        df = df.set_index("time").sort_index()
+            if not candles:
+                print(f"No M1 candles found for {symbol}")
+                continue
 
-        # Build M5 candles and keep only complete 5-minute groups.
-        m5 = (
-            df.resample("5min", label="left", closed="left")
-            .agg(
-                open=("open", "first"),
-                high=("high", "max"),
-                low=("low", "min"),
-                close=("close", "last"),
-                volume=("volume", "sum"),
-                candle_count=("close", "count"),
+            rows = []
+
+            for c in candles:
+                rows.append(
+                    {
+                        "time": c.candle_time,
+                        "open": float(c.open),
+                        "high": float(c.high),
+                        "low": float(c.low),
+                        "close": float(c.close),
+                        "volume": float(c.volume or 0),
+                    }
+                )
+
+            df = pd.DataFrame(rows)
+            df["time"] = pd.to_datetime(df["time"])
+            df = df.set_index("time").sort_index()
+
+            # Build M5 candles and keep only complete 5-minute groups.
+            m5 = (
+                df.resample("5min", label="left", closed="left")
+                .agg(
+                    open=("open", "first"),
+                    high=("high", "max"),
+                    low=("low", "min"),
+                    close=("close", "last"),
+                    volume=("volume", "sum"),
+                    candle_count=("close", "count"),
+                )
+                .dropna()
             )
-            .dropna()
-        )
 
-        complete_m5 = m5[m5["candle_count"] == 5].copy()
-        complete_m5 = complete_m5.drop(columns=["candle_count"])
+            complete_m5 = m5[m5["candle_count"] == 5].copy()
+            complete_m5 = complete_m5.drop(columns=["candle_count"])
 
-        inserted = 0
-        updated = 0
+            inserted = 0
+            updated = 0
 
-        for candle_time, row in complete_m5.iterrows():
-            result = upsert_candle(
-                db=db,
-                symbol=symbol,
-                timeframe="M5",
-                candle_time=candle_time.to_pydatetime(),
-                row=row,
-            )
+            for candle_time, row in complete_m5.iterrows():
+                result = upsert_candle(
+                    db=db,
+                    symbol=symbol,
+                    timeframe="M5",
+                    candle_time=candle_time.to_pydatetime(),
+                    row=row,
+                )
 
-            if result == "inserted":
-                inserted += 1
-            else:
-                updated += 1
+                if result == "inserted":
+                    inserted += 1
+                else:
+                    updated += 1
 
-        db.commit()
+            db.commit()
 
-        print("M5 build complete.")
-        print("Symbol:", symbol)
-        print("M1 candles used:", len(df))
-        print("Complete M5 candles:", len(complete_m5))
-        print("Inserted:", inserted)
-        print("Updated:", updated)
-        print("First M5 candle:", complete_m5.index.min())
-        print("Last M5 candle:", complete_m5.index.max())
+            print("M5 build complete.")
+            print("Symbol:", symbol)
+            print("M1 candles used:", len(df))
+            print("Complete M5 candles:", len(complete_m5))
+            print("Inserted:", inserted)
+            print("Updated:", updated)
+            print("First M5 candle:", complete_m5.index.min())
+            print("Last M5 candle:", complete_m5.index.max())
 
     except Exception:
         db.rollback()
