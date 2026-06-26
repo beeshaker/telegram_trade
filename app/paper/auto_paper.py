@@ -87,17 +87,29 @@ def set_paused(db: Session, paused: bool) -> None:
     set_state(db, "trading_paused", "true" if paused else "false")
 
 
-def stop_today_key() -> str:
-    return f"stop_today_{today_ny().isoformat()}"
+def stop_today_key(epic: str | None = None) -> str:
+    if epic is None:
+        return f"stop_today_{today_ny().isoformat()}"
+    return f"stop_today_{epic}_{today_ny().isoformat()}"
 
 
-def is_stopped_today(db: Session) -> bool:
-    return get_state(db, stop_today_key(), "false").lower() == "true"
+def is_stopped_today(db: Session, epic: str | None = None) -> bool:
+    return get_state(db, stop_today_key(epic), "false").lower() == "true"
 
 
-def stop_trading_today(db: Session) -> None:
-    set_state(db, stop_today_key(), "true")
-    cancel_pending_trades(db)
+def stop_trading_today(db: Session, epic: str | None = None) -> None:
+    set_state(db, stop_today_key(epic), "true")
+    if epic is None:
+        cancel_pending_trades(db)
+    else:
+        trades = db.query(PaperTrade).filter(
+            PaperTrade.status == "PENDING", PaperTrade.symbol == epic
+        ).all()
+        for trade in trades:
+            trade.status = "CANCELLED"
+            trade.result = "CANCELLED"
+            trade.updated_at = utc_now()
+        db.commit()
 
 
 def get_latest_price(db: Session, symbol: str) -> float | None:
@@ -119,13 +131,11 @@ def get_latest_candle(db: Session, symbol: str) -> Candle | None:
     )
 
 
-def get_open_trades(db: Session) -> list[PaperTrade]:
-    return (
-        db.query(PaperTrade)
-        .filter(PaperTrade.status.in_(["PENDING", "ACTIVE"]))
-        .order_by(PaperTrade.created_at.asc())
-        .all()
-    )
+def get_open_trades(db: Session, symbol: str | None = None) -> list[PaperTrade]:
+    q = db.query(PaperTrade).filter(PaperTrade.status.in_(["PENDING", "ACTIVE"]))
+    if symbol is not None:
+        q = q.filter(PaperTrade.symbol == symbol)
+    return q.order_by(PaperTrade.created_at.asc()).all()
 
 
 def cancel_pending_trades(db: Session) -> int:
@@ -266,17 +276,19 @@ def monitor_trades(db: Session, symbol: str, current_price: float) -> list[dict]
     return events
 
 
-def trades_today_count(db: Session) -> int:
+def trades_today_count(db: Session, symbol: str | None = None) -> int:
     start_ny = datetime.combine(today_ny(), datetime.min.time(), tzinfo=NY)
     start_utc = start_ny.astimezone(UTC).replace(tzinfo=None)
-    return db.query(PaperTrade).filter(PaperTrade.created_at >= start_utc).count()
+    q = db.query(PaperTrade).filter(PaperTrade.created_at >= start_utc)
+    if symbol is not None:
+        q = q.filter(PaperTrade.symbol == symbol)
+    return q.count()
 
 
-def losses_today_count(db: Session) -> int:
+def losses_today_count(db: Session, symbol: str | None = None) -> int:
     start_ny = datetime.combine(today_ny(), datetime.min.time(), tzinfo=NY)
     start_utc = start_ny.astimezone(UTC).replace(tzinfo=None)
-    return (
-        db.query(PaperTrade)
-        .filter(PaperTrade.created_at >= start_utc, PaperTrade.result == "LOSS")
-        .count()
-    )
+    q = db.query(PaperTrade).filter(PaperTrade.created_at >= start_utc, PaperTrade.result == "LOSS")
+    if symbol is not None:
+        q = q.filter(PaperTrade.symbol == symbol)
+    return q.count()
