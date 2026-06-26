@@ -200,8 +200,8 @@ def main():
             print("Before 09:45 NY. Strategy not active yet.")
             return
 
-        if latest_ny.time() > time(11, 30):
-            print("After 11:30 NY. No new trades.")
+        if latest_ny.time() > time(10, 30):
+            print("After 10:30 NY. No new trades.")
             return
 
         overnight_start_ny = datetime.combine(session_date - timedelta(days=1), time(18, 0), tzinfo=NY)
