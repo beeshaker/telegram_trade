@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import datetime, time
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, JSON
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, Numeric, String, Text, Time, UniqueConstraint, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -135,4 +135,25 @@ class BotState(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     key: Mapped[str] = mapped_column(String(100), index=True)
     value: Mapped[str] = mapped_column(String(255), default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class EpicConfig(Base):
+    __tablename__ = "epic_configs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    epic: Mapped[str] = mapped_column(String(50), unique=True, index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    timezone: Mapped[str] = mapped_column(String(50))
+    session_name: Mapped[str] = mapped_column(String(100))
+    range_short_start: Mapped[time] = mapped_column(Time)
+    range_short_end: Mapped[time] = mapped_column(Time)
+    range_long_start: Mapped[time] = mapped_column(Time)
+    range_long_end: Mapped[time] = mapped_column(Time)
+    trade_start: Mapped[time] = mapped_column(Time)
+    trade_end: Mapped[time] = mapped_column(Time)
+    risk_per_trade_percent: Mapped[float | None] = mapped_column(Numeric(5, 2), nullable=True)
+    max_trades_per_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_losses_per_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
