@@ -10,16 +10,10 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.data.capital_client import CapitalClient
 from app.db import SessionLocal
+from app.epics import list_enabled_epics
 from app.models import Candle
 
 load_dotenv()
-
-
-def parse_epics() -> list[str]:
-    multi = os.getenv("CAPITAL_EPICS", "")
-    if multi:
-        return [e.strip() for e in multi.split(",") if e.strip()]
-    return [os.getenv("CAPITAL_EPIC", "US100")]
 
 
 def mid_price(price_dict: dict) -> float:
@@ -88,21 +82,21 @@ def upsert_candle(db, symbol: str, timeframe: str, candle: dict):
 
 
 def main():
-    epics = parse_epics()
     resolution = os.getenv("CAPITAL_RESOLUTION", "MINUTE")
     max_count = int(os.getenv("CAPITAL_MAX_CANDLES", "1000"))
 
-    print("Syncing Capital.com candles")
-    print("EPICs:", ", ".join(epics))
-    print("Resolution:", resolution)
-    print("Max candles:", max_count)
-
-    client = CapitalClient()
-    client.create_session()
-
     db = SessionLocal()
-
     try:
+        epics = [c.epic for c in list_enabled_epics(db)]
+
+        print("Syncing Capital.com candles")
+        print("EPICs:", ", ".join(epics))
+        print("Resolution:", resolution)
+        print("Max candles:", max_count)
+
+        client = CapitalClient()
+        client.create_session()
+
         for epic in epics:
             print(f"\n=== Syncing {epic} ===")
 

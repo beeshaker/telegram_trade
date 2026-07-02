@@ -1,4 +1,3 @@
-import os
 import sys
 from pathlib import Path
 
@@ -9,16 +8,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.db import SessionLocal
+from app.epics import list_enabled_epics
 from app.models import Candle
 
 load_dotenv()
-
-
-def parse_epics() -> list[str]:
-    multi = os.getenv("CAPITAL_EPICS", "")
-    if multi:
-        return [e.strip() for e in multi.split(",") if e.strip()]
-    return [os.getenv("CAPITAL_EPIC", "US100")]
 
 
 def upsert_candle(db, symbol: str, timeframe: str, candle_time, row):
@@ -58,8 +51,8 @@ def upsert_candle(db, symbol: str, timeframe: str, candle_time, row):
 
 
 def main():
-    symbols = parse_epics()
     db = SessionLocal()
+    symbols = [c.epic for c in list_enabled_epics(db)]
 
     try:
         for symbol in symbols:
