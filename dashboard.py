@@ -1,4 +1,3 @@
-import os
 import sys
 import time
 from datetime import datetime, time as dtime, timedelta
@@ -24,7 +23,7 @@ from app.paper.auto_paper import (
     set_paused,
     stop_trading_today,
 )
-from app.epics import CURATED_TIMEZONES, delete_epic_config, list_all_epics, upsert_epic_config
+from app.epics import CURATED_TIMEZONES, delete_epic_config, list_all_epics, list_enabled_epics, upsert_epic_config
 
 load_dotenv()
 
@@ -143,9 +142,10 @@ def load_dashboard_data(symbol: str, candle_limit: int):
         db.close()
 
 
-def get_levels(symbol: str):
+def get_levels(symbol: str, cfg):
     db = SessionLocal()
     try:
+        tz = ZoneInfo(cfg.timezone)
         latest = (
             db.query(Candle)
             .filter(Candle.symbol == symbol, Candle.timeframe == "M1")
@@ -155,17 +155,17 @@ def get_levels(symbol: str):
         if not latest:
             return None
 
-        latest_ny = utc_naive_to_ny(latest.candle_time)
-        session_date = latest_ny.date()
+        latest_local = latest.candle_time.replace(tzinfo=UTC).astimezone(tz)
+        session_date = latest_local.date()
 
-        def range_query(start_ny, end_ny):
+        def range_query(start_local, end_local):
             candles = (
                 db.query(Candle)
                 .filter(
                     Candle.symbol == symbol,
                     Candle.timeframe == "M1",
-                    Candle.candle_time >= ny_to_utc_naive(start_ny),
-                    Candle.candle_time < ny_to_utc_naive(end_ny),
+                    Candle.candle_time >= start_local.astimezone(UTC).replace(tzinfo=None),
+                    Candle.candle_time < end_local.astimezone(UTC).replace(tzinfo=None),
                 )
                 .all()
             )
@@ -179,18 +179,18 @@ def get_levels(symbol: str):
 
         return {
             "session_date": session_date,
-            "latest_ny": latest_ny,
+            "latest_local": latest_local,
             "overnight": range_query(
-                datetime.combine(session_date - timedelta(days=1), dtime(18, 0), tzinfo=NY),
-                datetime.combine(session_date, dtime(9, 30), tzinfo=NY),
+                datetime.combine(session_date - timedelta(days=1), dtime(18, 0), tzinfo=tz),
+                datetime.combine(session_date, cfg.range_short_start, tzinfo=tz),
             ),
-            "ny15": range_query(
-                datetime.combine(session_date, dtime(9, 30), tzinfo=NY),
-                datetime.combine(session_date, dtime(9, 45), tzinfo=NY),
+            "range_short": range_query(
+                datetime.combine(session_date, cfg.range_short_start, tzinfo=tz),
+                datetime.combine(session_date, cfg.range_short_end, tzinfo=tz),
             ),
-            "ny30": range_query(
-                datetime.combine(session_date, dtime(9, 30), tzinfo=NY),
-                datetime.combine(session_date, dtime(10, 0), tzinfo=NY),
+            "range_long": range_query(
+                datetime.combine(session_date, cfg.range_long_start, tzinfo=tz),
+                datetime.combine(session_date, cfg.range_long_end, tzinfo=tz),
             ),
         }
     finally:
@@ -296,10 +296,10 @@ def price_chart_df(candles, levels, open_trades, overlays):
         mapping = {
             "Overnight high": ("overnight", "high"),
             "Overnight low": ("overnight", "low"),
-            "NY 15m high": ("ny15", "high"),
-            "NY 15m low": ("ny15", "low"),
-            "NY 30m high": ("ny30", "high"),
-            "NY 30m low": ("ny30", "low"),
+            "Range short high": ("range_short", "high"),
+            "Range short low": ("range_short", "low"),
+            "Range long high": ("range_long", "high"),
+            "Range long low": ("range_long", "low"),
         }
         for label, path in mapping.items():
             if label in overlays:
@@ -517,7 +517,21 @@ with st.expander("⚙️ Epic & Session Management", expanded=False):
 
 with st.sidebar:
     st.header("Controls")
-    symbol = st.text_input("Symbol / EPIC", os.getenv("CAPITAL_EPIC", "US100"))
+
+    db = SessionLocal()
+    try:
+        enabled_configs = list_enabled_epics(db)
+    finally:
+        db.close()
+
+    if not enabled_configs:
+        st.warning("No epics enabled. Enable at least one epic in the Epic & Session Management panel above.")
+        st.stop()
+
+    epic_options = [cfg.epic for cfg in enabled_configs]
+    symbol = st.selectbox("Symbol / EPIC", epic_options, index=0)
+    selected_epic_config = next(cfg for cfg in enabled_configs if cfg.epic == symbol)
+
     refresh_seconds = st.selectbox("Auto refresh", [0, 10, 30, 60], index=2, format_func=lambda x: "Off" if x == 0 else f"{x}s")
 
     st.divider()
@@ -541,10 +555,10 @@ with st.sidebar:
         [
             "Overnight high",
             "Overnight low",
-            "NY 15m high",
-            "NY 15m low",
-            "NY 30m high",
-            "NY 30m low",
+            "Range short high",
+            "Range short low",
+            "Range long high",
+            "Range long low",
             "Active entry",
             "Active SL",
             "Active TP",
@@ -613,14 +627,14 @@ status_col1.info(f"Latest NY candle: {latest_ny}")
 status_col2.warning("Paused" if data["paused"] else "Trading allowed")
 status_col3.warning("Stopped today" if data["stopped_today"] else "Not stopped today")
 
-levels = get_levels(symbol)
-with st.expander("NY session levels", expanded=True):
+levels = get_levels(symbol, selected_epic_config)
+with st.expander(f"{selected_epic_config.session_name} session levels", expanded=True):
     if not levels:
         st.write("No levels available yet.")
     else:
         st.write(f"Session date: **{levels['session_date']}**")
         lev_cols = st.columns(3)
-        for label, key, col in [("Overnight", "overnight", lev_cols[0]), ("NY 15m", "ny15", lev_cols[1]), ("NY 30m", "ny30", lev_cols[2])]:
+        for label, key, col in [("Overnight", "overnight", lev_cols[0]), ("Range short", "range_short", lev_cols[1]), ("Range long", "range_long", lev_cols[2])]:
             val = levels[key]
             if val:
                 col.metric(f"{label} high", fmt_num(val["high"]))
