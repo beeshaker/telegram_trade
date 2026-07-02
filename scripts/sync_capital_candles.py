@@ -89,6 +89,10 @@ def main():
     try:
         epics = [c.epic for c in list_enabled_epics(db)]
 
+        if not epics:
+            print("No enabled epics configured. Nothing to sync.")
+            return
+
         print("Syncing Capital.com candles")
         print("EPICs:", ", ".join(epics))
         print("Resolution:", resolution)

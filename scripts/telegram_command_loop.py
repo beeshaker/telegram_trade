@@ -1,4 +1,3 @@
-import os
 import sys
 import time
 from datetime import datetime, time as dtime, timedelta
@@ -13,7 +12,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.config import get_settings
 from app.db import SessionLocal
-from app.epics import list_enabled_epics
+from app.epics import get_epic_config, list_enabled_epics
 from app.models import Candle, PaperTrade
 from app.paper.auto_paper import (
     cancel_pending_trades,
@@ -32,7 +31,6 @@ from app.paper.auto_paper import (
 )
 
 load_dotenv()
-NY = ZoneInfo("America/New_York")
 
 UTC = ZoneInfo("UTC")
 
@@ -47,27 +45,28 @@ def send(chat_id, message):
     requests.post(url, json=payload, timeout=10)
 
 
-def ny_to_utc_naive(dt):
-    return dt.astimezone(UTC).replace(tzinfo=None)
-
-
 def levels_text(db, symbol):
+    cfg = get_epic_config(db, symbol)
+    if cfg is None:
+        return "No configuration found for this epic."
+
     latest = get_latest_candle(db, symbol)
     if not latest:
         return "No candles found."
 
+    tz = ZoneInfo(cfg.timezone)
     latest_utc = latest.candle_time.replace(tzinfo=UTC)
-    latest_ny = latest_utc.astimezone(NY)
-    session_date = latest_ny.date()
+    latest_local = latest_utc.astimezone(tz)
+    session_date = latest_local.date()
 
-    def range_query(start_ny, end_ny):
+    def range_query(start_local, end_local):
         candles = (
             db.query(Candle)
             .filter(
                 Candle.symbol == symbol,
                 Candle.timeframe == "M1",
-                Candle.candle_time >= ny_to_utc_naive(start_ny),
-                Candle.candle_time < ny_to_utc_naive(end_ny),
+                Candle.candle_time >= start_local.astimezone(UTC).replace(tzinfo=None),
+                Candle.candle_time < end_local.astimezone(UTC).replace(tzinfo=None),
             )
             .all()
         )
@@ -76,16 +75,16 @@ def levels_text(db, symbol):
         return max(float(c.high) for c in candles), min(float(c.low) for c in candles), len(candles)
 
     overnight = range_query(
-        datetime.combine(session_date - timedelta(days=1), dtime(18, 0), tzinfo=NY),
-        datetime.combine(session_date, dtime(9, 30), tzinfo=NY),
+        datetime.combine(session_date - timedelta(days=1), dtime(18, 0), tzinfo=tz),
+        datetime.combine(session_date, cfg.range_short_start, tzinfo=tz),
     )
-    ny15 = range_query(
-        datetime.combine(session_date, dtime(9, 30), tzinfo=NY),
-        datetime.combine(session_date, dtime(9, 45), tzinfo=NY),
+    range_short = range_query(
+        datetime.combine(session_date, cfg.range_short_start, tzinfo=tz),
+        datetime.combine(session_date, cfg.range_short_end, tzinfo=tz),
     )
-    ny30 = range_query(
-        datetime.combine(session_date, dtime(9, 30), tzinfo=NY),
-        datetime.combine(session_date, dtime(10, 0), tzinfo=NY),
+    range_long = range_query(
+        datetime.combine(session_date, cfg.range_long_start, tzinfo=tz),
+        datetime.combine(session_date, cfg.range_long_end, tzinfo=tz),
     )
 
     def fmt(label, item):
@@ -95,12 +94,12 @@ def levels_text(db, symbol):
         return f"<b>{label}:</b> High {high:.2f} / Low {low:.2f} / Candles {count}"
 
     return (
-        f"📊 <b>{symbol} NY Levels</b>\n\n"
-        f"<b>Latest NY time:</b> {latest_ny.strftime('%Y-%m-%d %H:%M:%S %Z')}\n"
+        f"📊 <b>{symbol} {cfg.session_name} Levels</b>\n\n"
+        f"<b>Latest local time:</b> {latest_local.strftime('%Y-%m-%d %H:%M:%S %Z')}\n"
         f"<b>Current price:</b> {float(latest.close):.2f}\n\n"
         f"{fmt('Overnight', overnight)}\n"
-        f"{fmt('NY 15m', ny15)}\n"
-        f"{fmt('NY 30m', ny30)}"
+        f"{fmt('Range short', range_short)}\n"
+        f"{fmt('Range long', range_long)}"
     )
 
 
@@ -184,7 +183,7 @@ def handle_command(chat_id, text):
 /open - Show open paper trade
 /close - Close active paper trade at current price
 /cancel - Cancel pending paper trades
-/levels - Show NY levels
+/levels - Show session levels
 /summary - Show paper summary
 /reset_paper - Ask to reset paper account
 /confirm_reset - Confirm paper reset
