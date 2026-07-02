@@ -10,7 +10,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.alerts.telegram_alerts import TelegramAlert, format_signal_alert
+from app.config import get_settings
 from app.db import SessionLocal
+from app.epics import effective_risk, list_enabled_epics
 from app.models import Candle, Signal
 from app.paper.auto_paper import (
     create_trade_from_signal,
@@ -32,21 +34,6 @@ from app.strategy.sweep_detector import detect_sweep
 load_dotenv()
 
 UTC = ZoneInfo("UTC")
-
-SESSION_CONFIG = {
-    "US100":      {"tz": "America/New_York", "range_short": (time(9,30),  time(9,45)),  "range_long": (time(9,30),  time(10,0)),  "trade_start": time(9,45),  "trade_end": time(10,30), "session_name": "NY Open"},
-    "NATURALGAS": {"tz": "America/New_York", "range_short": (time(9,30),  time(9,45)),  "range_long": (time(9,30),  time(10,0)),  "trade_start": time(9,45),  "trade_end": time(10,30), "session_name": "NY Open"},
-    "UK100":      {"tz": "Europe/London",    "range_short": (time(8,0),   time(8,15)),  "range_long": (time(8,0),   time(8,30)),  "trade_start": time(8,15),  "trade_end": time(9,0),   "session_name": "London"},
-    "GOLD":       {"tz": "Europe/London",    "range_short": (time(8,0),   time(8,15)),  "range_long": (time(8,0),   time(8,30)),  "trade_start": time(8,15),  "trade_end": time(9,0),   "session_name": "London"},
-    "USDJPY":     {"tz": "Asia/Tokyo",       "range_short": (time(9,0),   time(9,15)),  "range_long": (time(9,0),   time(9,30)),  "trade_start": time(9,15),  "trade_end": time(10,0),  "session_name": "Tokyo"},
-}
-
-
-def parse_epics() -> list[str]:
-    multi = os.getenv("CAPITAL_EPICS", "")
-    if multi:
-        return [e.strip() for e in multi.split(",") if e.strip()]
-    return [os.getenv("CAPITAL_EPIC", "US100")]
 
 
 def send(msg: str):
@@ -106,7 +93,7 @@ def get_candles(db, symbol, timeframe, start_utc, end_utc):
     ]
 
 
-def notify_trade_created(signal, trade, account):
+def notify_trade_created(signal, trade, account, risk_percent):
     msg = format_signal_alert(
         {
             "symbol": signal.symbol,
@@ -115,7 +102,7 @@ def notify_trade_created(signal, trade, account):
             "entry_price": float(signal.entry_price),
             "stop_loss": float(signal.stop_loss),
             "take_profit": float(signal.take_profit),
-            "risk_percent": os.getenv("RISK_PER_TRADE_PERCENT", "0.5"),
+            "risk_percent": risk_percent,
             "session_high": float(signal.session_high) if signal.session_high is not None else None,
             "session_low": float(signal.session_low) if signal.session_low is not None else None,
             "opening_range_high": float(signal.opening_range_high),
@@ -159,25 +146,21 @@ def notify_trade_event(event):
 
 
 def main():
-    risk_percent = float(os.getenv("RISK_PER_TRADE_PERCENT", "0.5"))
-    max_trades_per_day = int(os.getenv("MAX_TRADES_PER_DAY", "1"))
-    max_losses_per_day = int(os.getenv("MAX_LOSSES_PER_DAY", "2"))
+    settings = get_settings()
     sweep_buffer = float(os.getenv("SWEEP_BUFFER_POINTS", "0"))
     stop_buffer = float(os.getenv("STOP_BUFFER_POINTS", "2"))
 
-    epics = parse_epics()
     db = SessionLocal()
 
     try:
         account = ensure_paper_account(db)
+        epic_configs = list_enabled_epics(db)
 
-        for epic in epics:
-            cfg = SESSION_CONFIG.get(epic)
-            if cfg is None:
-                print(f"No SESSION_CONFIG for {epic}, skipping.")
-                continue
+        for cfg in epic_configs:
+            epic = cfg.epic
+            risk_percent, max_trades_per_day, max_losses_per_day = effective_risk(cfg, settings)
 
-            TZ = ZoneInfo(cfg["tz"])
+            TZ = ZoneInfo(cfg.timezone)
 
             latest_candle = get_latest_candle(db, epic)
             latest_price = get_latest_price(db, epic)
@@ -220,10 +203,10 @@ def main():
                 send(f"🛑 <b>Daily Risk Limit Hit ({epic})</b>\n\nNo more AUTO_PAPER trades today for {epic}.")
                 continue
 
-            trade_start = cfg["trade_start"]
-            trade_end = cfg["trade_end"]
-            range_short_start, range_short_end = cfg["range_short"]
-            range_long_start, range_long_end = cfg["range_long"]
+            trade_start = cfg.trade_start
+            trade_end = cfg.trade_end
+            range_short_start, range_short_end = cfg.range_short_start, cfg.range_short_end
+            range_long_start, range_long_end = cfg.range_long_start, cfg.range_long_end
 
             if latest_local.time() < trade_start:
                 print(f"[{epic}] Before {trade_start}. Strategy not active yet.")
@@ -287,7 +270,7 @@ def main():
                     Signal.symbol == epic,
                     Signal.direction == sweep.direction,
                     Signal.signal_time == fvg_candle["candle_time"],
-                    Signal.setup_type == f"{cfg['session_name']} Sweep + FVG AUTO_PAPER ({range_name})",
+                    Signal.setup_type == f"{cfg.session_name} Sweep + FVG AUTO_PAPER ({range_name})",
                 )
                 .first()
             )
@@ -300,7 +283,7 @@ def main():
                 symbol=epic,
                 signal_time=fvg_candle["candle_time"],
                 direction=sweep.direction,
-                setup_type=f"{cfg['session_name']} Sweep + FVG AUTO_PAPER ({range_name})",
+                setup_type=f"{cfg.session_name} Sweep + FVG AUTO_PAPER ({range_name})",
                 status="DETECTED",
                 session_high=overnight["high"] if overnight else None,
                 session_low=overnight["low"] if overnight else None,
@@ -322,7 +305,7 @@ def main():
 
             trade = create_trade_from_signal(db, signal, risk_percent)
             account = ensure_paper_account(db)
-            notify_trade_created(signal, trade, account)
+            notify_trade_created(signal, trade, account, risk_percent)
             print(f"[{epic}] Auto paper trade created.")
 
     finally:
