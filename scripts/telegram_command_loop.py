@@ -13,6 +13,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.config import get_settings
 from app.db import SessionLocal
+from app.epics import list_enabled_epics
 from app.models import Candle, PaperTrade
 from app.paper.auto_paper import (
     cancel_pending_trades,
@@ -32,14 +33,6 @@ from app.paper.auto_paper import (
 
 load_dotenv()
 NY = ZoneInfo("America/New_York")
-
-
-def parse_epics() -> list[str]:
-    multi = os.getenv("CAPITAL_EPICS", "")
-    if multi:
-        return [e.strip() for e in multi.split(",") if e.strip()]
-    return [os.getenv("CAPITAL_EPIC", "US100")]
-
 
 UTC = ZoneInfo("UTC")
 
@@ -112,20 +105,9 @@ def levels_text(db, symbol):
 
 
 def status_text(db):
-    epics = parse_epics()
+    epic_configs = list_enabled_epics(db)
     account = ensure_paper_account(db)
     paused = is_paused(db)
-
-    EPIC_DISPLAY = {
-        "NATURALGAS": "NATGAS",
-    }
-    SESSION_DISPLAY = {
-        "US100": "NY Open",
-        "NATURALGAS": "NY Open",
-        "UK100": "London",
-        "GOLD": "London",
-        "USDJPY": "Tokyo",
-    }
 
     lines = [
         "🤖 <b>Bot Status</b>",
@@ -135,14 +117,17 @@ def status_text(db):
         "",
     ]
 
-    for epic in epics:
-        display = EPIC_DISPLAY.get(epic, epic)
-        session = SESSION_DISPLAY.get(epic, "")
-        t = trades_today_count(db, epic)
-        l = losses_today_count(db, epic)
-        lines.append(f"{display:<8} | {session:<10} | Trades: {t} | Losses: {l}")
+    for cfg in epic_configs:
+        t = trades_today_count(db, cfg.epic)
+        l = losses_today_count(db, cfg.epic)
+        lines.append(f"{cfg.epic:<8} | {cfg.session_name:<10} | Trades: {t} | Losses: {l}")
 
     return "\n".join(lines)
+
+
+def default_symbol(db):
+    epic_configs = list_enabled_epics(db)
+    return epic_configs[0].epic if epic_configs else None
 
 
 def open_trades_text(db):
@@ -184,7 +169,7 @@ def summary_text(db):
 
 def handle_command(chat_id, text):
     db = SessionLocal()
-    symbol = os.getenv("CAPITAL_EPIC", "US100")
+    symbol = default_symbol(db)
     try:
         cmd = text.strip().split()[0].lower()
 
@@ -229,24 +214,30 @@ def handle_command(chat_id, text):
             send(chat_id, f"❌ Cancelled {count} pending paper trade(s).")
 
         elif cmd == "/close":
-            trades = get_open_trades(db)
-            active = [t for t in trades if t.status == "ACTIVE"]
-            if not active:
-                send(chat_id, "No active paper trade to close.")
+            if symbol is None:
+                send(chat_id, "No enabled epics configured.")
             else:
-                current_price = get_latest_price(db, symbol)
-                event = close_trade_manually(db, active[0], current_price)
-                send(
-                    chat_id,
-                    f"✅ <b>Paper trade manually closed</b>\n\n"
-                    f"<b>Symbol:</b> {active[0].symbol}\n"
-                    f"<b>Exit:</b> {current_price:.2f}\n"
-                    f"<b>Result:</b> {event['r_multiple']:.2f}R\n"
-                    f"<b>New Balance:</b> ${event['new_balance']:.2f}"
-                )
+                trades = get_open_trades(db)
+                active = [t for t in trades if t.status == "ACTIVE"]
+                if not active:
+                    send(chat_id, "No active paper trade to close.")
+                else:
+                    current_price = get_latest_price(db, symbol)
+                    event = close_trade_manually(db, active[0], current_price)
+                    send(
+                        chat_id,
+                        f"✅ <b>Paper trade manually closed</b>\n\n"
+                        f"<b>Symbol:</b> {active[0].symbol}\n"
+                        f"<b>Exit:</b> {current_price:.2f}\n"
+                        f"<b>Result:</b> {event['r_multiple']:.2f}R\n"
+                        f"<b>New Balance:</b> ${event['new_balance']:.2f}"
+                    )
 
         elif cmd == "/levels":
-            send(chat_id, levels_text(db, symbol))
+            if symbol is None:
+                send(chat_id, "No enabled epics configured.")
+            else:
+                send(chat_id, levels_text(db, symbol))
 
         elif cmd == "/summary":
             send(chat_id, summary_text(db))
