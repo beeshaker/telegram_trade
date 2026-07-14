@@ -100,35 +100,41 @@ def set_paused(db: Session, paused: bool) -> None:
     set_state(db, "trading_paused", "true" if paused else "false")
 
 
-def stop_today_key(epic: str | None = None, strategy: str | None = None) -> str:
+def stop_today_key(epic: str | None = None, strategy: str | None = None, session_name: str | None = None) -> str:
     parts = ["stop_today"]
     if epic is not None:
         parts.append(epic)
     if strategy is not None:
         parts.append(strategy)
+    if session_name is not None:
+        parts.append(session_name)
     parts.append(today_ny().isoformat())
     return "_".join(parts)
 
 
-def is_stopped_today(db: Session, epic: str | None = None, strategy: str | None = None) -> bool:
-    return get_state(db, stop_today_key(epic, strategy), "false").lower() == "true"
+def is_stopped_today(db: Session, epic: str | None = None, strategy: str | None = None, session_name: str | None = None) -> bool:
+    return get_state(db, stop_today_key(epic, strategy, session_name), "false").lower() == "true"
 
 
-def _pending_trades_query(db: Session, epic: str | None = None, strategy: str | None = None):
+def _pending_trades_query(db: Session, epic: str | None = None, strategy: str | None = None, session_name: str | None = None):
     q = db.query(PaperTrade).filter(PaperTrade.status == "PENDING")
     if epic is not None:
         q = q.filter(PaperTrade.symbol == epic)
-    if strategy is not None:
-        q = q.join(Signal, PaperTrade.signal_id == Signal.id).filter(Signal.strategy == strategy)
+    if strategy is not None or session_name is not None:
+        q = q.join(Signal, PaperTrade.signal_id == Signal.id)
+        if strategy is not None:
+            q = q.filter(Signal.strategy == strategy)
+        if session_name is not None:
+            q = q.filter(Signal.session_name == session_name)
     return q
 
 
-def stop_trading_today(db: Session, epic: str | None = None, strategy: str | None = None) -> None:
-    set_state(db, stop_today_key(epic, strategy), "true")
-    if epic is None and strategy is None:
+def stop_trading_today(db: Session, epic: str | None = None, strategy: str | None = None, session_name: str | None = None) -> None:
+    set_state(db, stop_today_key(epic, strategy, session_name), "true")
+    if epic is None and strategy is None and session_name is None:
         cancel_pending_trades(db)
     else:
-        trades = _pending_trades_query(db, epic, strategy).all()
+        trades = _pending_trades_query(db, epic, strategy, session_name).all()
         for trade in trades:
             trade.status = "CANCELLED"
             trade.result = "CANCELLED"
@@ -155,12 +161,16 @@ def get_latest_candle(db: Session, symbol: str) -> Candle | None:
     )
 
 
-def get_open_trades(db: Session, symbol: str | None = None, strategy: str | None = None) -> list[PaperTrade]:
+def get_open_trades(db: Session, symbol: str | None = None, strategy: str | None = None, session_name: str | None = None) -> list[PaperTrade]:
     q = db.query(PaperTrade).filter(PaperTrade.status.in_(["PENDING", "ACTIVE"]))
     if symbol is not None:
         q = q.filter(PaperTrade.symbol == symbol)
-    if strategy is not None:
-        q = q.join(Signal, PaperTrade.signal_id == Signal.id).filter(Signal.strategy == strategy)
+    if strategy is not None or session_name is not None:
+        q = q.join(Signal, PaperTrade.signal_id == Signal.id)
+        if strategy is not None:
+            q = q.filter(Signal.strategy == strategy)
+        if session_name is not None:
+            q = q.filter(Signal.session_name == session_name)
     return q.order_by(PaperTrade.created_at.asc()).all()
 
 
@@ -305,23 +315,31 @@ def monitor_trades(db: Session, symbol: str, current_price: float) -> list[dict]
     return events
 
 
-def trades_today_count(db: Session, symbol: str | None = None, strategy: str | None = None) -> int:
+def trades_today_count(db: Session, symbol: str | None = None, strategy: str | None = None, session_name: str | None = None) -> int:
     start_ny = datetime.combine(today_ny(), datetime.min.time(), tzinfo=NY)
     start_utc = start_ny.astimezone(UTC).replace(tzinfo=None)
     q = db.query(PaperTrade).filter(PaperTrade.created_at >= start_utc)
     if symbol is not None:
         q = q.filter(PaperTrade.symbol == symbol)
-    if strategy is not None:
-        q = q.join(Signal, PaperTrade.signal_id == Signal.id).filter(Signal.strategy == strategy)
+    if strategy is not None or session_name is not None:
+        q = q.join(Signal, PaperTrade.signal_id == Signal.id)
+        if strategy is not None:
+            q = q.filter(Signal.strategy == strategy)
+        if session_name is not None:
+            q = q.filter(Signal.session_name == session_name)
     return q.count()
 
 
-def losses_today_count(db: Session, symbol: str | None = None, strategy: str | None = None) -> int:
+def losses_today_count(db: Session, symbol: str | None = None, strategy: str | None = None, session_name: str | None = None) -> int:
     start_ny = datetime.combine(today_ny(), datetime.min.time(), tzinfo=NY)
     start_utc = start_ny.astimezone(UTC).replace(tzinfo=None)
     q = db.query(PaperTrade).filter(PaperTrade.created_at >= start_utc, PaperTrade.result == "LOSS")
     if symbol is not None:
         q = q.filter(PaperTrade.symbol == symbol)
-    if strategy is not None:
-        q = q.join(Signal, PaperTrade.signal_id == Signal.id).filter(Signal.strategy == strategy)
+    if strategy is not None or session_name is not None:
+        q = q.join(Signal, PaperTrade.signal_id == Signal.id)
+        if strategy is not None:
+            q = q.filter(Signal.strategy == strategy)
+        if session_name is not None:
+            q = q.filter(Signal.session_name == session_name)
     return q.count()

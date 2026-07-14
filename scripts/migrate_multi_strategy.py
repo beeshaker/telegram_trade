@@ -83,11 +83,38 @@ def migrate_signals(conn, inspector) -> None:
     print("signals migrated.")
 
 
+def migrate_signals_session_name(conn, inspector) -> None:
+    columns = _column_names(inspector, "signals")
+    if "session_name" in columns:
+        print("signals.session_name already migrated. Skipping.")
+        return
+
+    print("Adding session_name column to signals, backfilling from epic_configs...")
+    conn.execute(text("ALTER TABLE signals ADD COLUMN session_name VARCHAR(100)"))
+    conn.execute(
+        text(
+            """
+            UPDATE signals
+            SET session_name = (
+                SELECT ec.session_name
+                FROM epic_configs ec
+                WHERE ec.epic = signals.symbol AND ec.strategy = signals.strategy
+                ORDER BY ec.id ASC
+                LIMIT 1
+            )
+            WHERE session_name IS NULL
+            """
+        )
+    )
+    print("signals.session_name migrated.")
+
+
 def main() -> None:
     with engine.begin() as conn:
         inspector = inspect(conn)
         migrate_epic_configs(conn, inspector)
         migrate_signals(conn, inspector)
+        migrate_signals_session_name(conn, inspector)
     print("Migration complete.")
 
 

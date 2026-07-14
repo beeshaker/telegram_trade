@@ -100,6 +100,7 @@ def test_run_opening_range_strategy_creates_signal_and_trade(db_session):
 
     signal = db_session.query(Signal).one()
     assert signal.strategy == "SWEEP_FVG_OPENING_RANGE"
+    assert signal.session_name == cfg.session_name
     assert signal.symbol == "US100"
     assert signal.direction == "SELL"
     assert float(signal.entry_price) == pytest.approx(102.5)
@@ -188,6 +189,7 @@ def test_run_pdh_pdl_strategy_creates_signal_and_trade(db_session):
 
     signal = db_session.query(Signal).one()
     assert signal.strategy == "SWEEP_FVG_PDH_PDL"
+    assert signal.session_name == cfg.session_name
     assert signal.direction == "SELL"
     assert float(signal.opening_range_high) == pytest.approx(105.0)
     assert float(signal.opening_range_low) == pytest.approx(95.0)
@@ -272,6 +274,7 @@ def test_run_vwap_strategy_creates_signal_and_trade_on_fade(db_session):
 
     signal = db_session.query(Signal).one()
     assert signal.strategy == "VWAP_MEAN_REVERSION"
+    assert signal.session_name == cfg.session_name
     assert signal.direction == "SELL"
     assert float(signal.entry_price) == pytest.approx(100.95, abs=0.01)
     assert float(signal.stop_loss) == pytest.approx(110.5, abs=0.01)

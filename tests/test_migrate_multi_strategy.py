@@ -1,6 +1,10 @@
 from sqlalchemy import create_engine, inspect, text
 
-from scripts.migrate_multi_strategy import migrate_epic_configs, migrate_signals
+from scripts.migrate_multi_strategy import (
+    migrate_epic_configs,
+    migrate_signals,
+    migrate_signals_session_name,
+)
 
 
 def _build_old_schema(engine):
@@ -117,3 +121,31 @@ def test_migrate_signals_is_idempotent():
         migrate_signals(conn, inspect(conn))  # must no-op, not raise
         row = conn.execute(text("SELECT strategy FROM signals WHERE id = 1")).fetchone()
         assert row[0] == "SWEEP_FVG_OPENING_RANGE"
+
+
+def test_migrate_signals_session_name_backfills_from_epic_configs():
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    _build_old_schema(engine)
+
+    with engine.begin() as conn:
+        migrate_epic_configs(conn, inspect(conn))
+        migrate_signals(conn, inspect(conn))
+        migrate_signals_session_name(conn, inspect(conn))
+
+    with engine.begin() as conn:
+        row = conn.execute(text("SELECT session_name FROM signals WHERE id = 1")).fetchone()
+        assert row[0] == "NY Open"
+
+
+def test_migrate_signals_session_name_is_idempotent():
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    _build_old_schema(engine)
+
+    with engine.begin() as conn:
+        migrate_epic_configs(conn, inspect(conn))
+        migrate_signals(conn, inspect(conn))
+        migrate_signals_session_name(conn, inspect(conn))
+    with engine.begin() as conn:
+        migrate_signals_session_name(conn, inspect(conn))  # must no-op, not raise
+        row = conn.execute(text("SELECT session_name FROM signals WHERE id = 1")).fetchone()
+        assert row[0] == "NY Open"

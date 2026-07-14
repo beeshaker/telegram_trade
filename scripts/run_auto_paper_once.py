@@ -244,6 +244,7 @@ def run_opening_range_strategy(db, cfg, settings, sweep_buffer, stop_buffer, acc
     signal = Signal(
         symbol=epic,
         strategy=cfg.strategy,
+        session_name=cfg.session_name,
         signal_time=fvg_candle["candle_time"],
         direction=sweep.direction,
         setup_type=setup_type,
@@ -344,6 +345,7 @@ def run_pdh_pdl_strategy(db, cfg, settings, sweep_buffer, stop_buffer, account, 
     signal = Signal(
         symbol=epic,
         strategy=cfg.strategy,
+        session_name=cfg.session_name,
         signal_time=fvg_candle["candle_time"],
         direction=sweep.direction,
         setup_type=setup_type,
@@ -453,6 +455,7 @@ def run_vwap_strategy(db, cfg, settings, sweep_buffer, stop_buffer, account, lat
     signal = Signal(
         symbol=epic,
         strategy=cfg.strategy,
+        session_name=cfg.session_name,
         signal_time=fvg_candle["candle_time"],
         direction=sweep.direction,
         setup_type=setup_type,
@@ -501,6 +504,7 @@ def main():
         for cfg in epic_configs:
             epic = cfg.epic
             strategy = cfg.strategy
+            session_name = cfg.session_name
             risk_percent, max_trades_per_day, max_losses_per_day = effective_risk(cfg, settings)
 
             TZ = ZoneInfo(cfg.timezone)
@@ -527,21 +531,21 @@ def main():
                 print(f"[{epic}/{strategy}] Trading paused. Monitoring only.")
                 continue
 
-            if is_stopped_today(db) or is_stopped_today(db, epic, strategy):
+            if is_stopped_today(db) or is_stopped_today(db, epic, strategy, session_name):
                 print(f"[{epic}/{strategy}] Stopped for today. Monitoring only.")
                 continue
 
-            if get_open_trades(db, epic, strategy):
+            if get_open_trades(db, epic, strategy, session_name):
                 print(f"[{epic}/{strategy}] Open/pending trade exists. No new trade.")
                 continue
 
-            if trades_today_count(db, epic, strategy) >= max_trades_per_day:
+            if trades_today_count(db, epic, strategy, session_name) >= max_trades_per_day:
                 print(f"[{epic}/{strategy}] Max trades per day reached.")
                 continue
 
-            if losses_today_count(db, epic, strategy) >= max_losses_per_day:
+            if losses_today_count(db, epic, strategy, session_name) >= max_losses_per_day:
                 print(f"[{epic}/{strategy}] Max losses per day reached.")
-                stop_trading_today(db, epic, strategy)
+                stop_trading_today(db, epic, strategy, session_name)
                 send(f"🛑 <b>Daily Risk Limit Hit ({epic} / {strategy})</b>\n\nNo more AUTO_PAPER trades today for {epic} on {strategy}.")
                 continue
 

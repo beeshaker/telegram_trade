@@ -61,13 +61,14 @@ from datetime import datetime
 from app.models import Signal
 
 
-def _make_signal(db, symbol, strategy):
+def _make_signal(db, symbol, strategy, session_name=None):
     signal = Signal(
         symbol=symbol,
         signal_time=datetime.utcnow(),
         direction="BUY",
         setup_type="test",
         strategy=strategy,
+        session_name=session_name,
     )
     db.add(signal)
     db.commit()
@@ -216,3 +217,82 @@ def test_monitor_trades_loss_is_still_exactly_minus_1r(db_session):
     assert events[0]["result"] == "LOSS"
     assert float(events[0]["trade"].r_multiple) == pytest.approx(-1.0)
     assert float(events[0]["trade"].pnl_amount) == pytest.approx(-10.0)
+
+
+def test_get_open_trades_scoped_by_session_name_isolates_am_pm_windows(db_session):
+    from app.paper.auto_paper import get_open_trades
+
+    sig_am = _make_signal(db_session, "US100", "SWEEP_FVG_OPENING_RANGE", session_name="NY Open")
+    sig_pm = _make_signal(db_session, "US100", "SWEEP_FVG_OPENING_RANGE", session_name="NY PM")
+    db_session.add_all(
+        [
+            PaperTrade(signal_id=sig_am.id, symbol="US100", direction="BUY", status="ACTIVE"),
+            PaperTrade(signal_id=sig_pm.id, symbol="US100", direction="BUY", status="PENDING"),
+        ]
+    )
+    db_session.commit()
+
+    am_trades = get_open_trades(db_session, "US100", "SWEEP_FVG_OPENING_RANGE", "NY Open")
+    pm_trades = get_open_trades(db_session, "US100", "SWEEP_FVG_OPENING_RANGE", "NY PM")
+    both_strategy_only = get_open_trades(db_session, "US100", "SWEEP_FVG_OPENING_RANGE")
+
+    assert len(am_trades) == 1
+    assert len(pm_trades) == 1
+    assert len(both_strategy_only) == 2
+
+
+def test_trades_today_count_scoped_by_session_name(db_session):
+    from app.paper.auto_paper import trades_today_count
+
+    sig_am = _make_signal(db_session, "US100", "SWEEP_FVG_OPENING_RANGE", session_name="NY Open")
+    sig_pm = _make_signal(db_session, "US100", "SWEEP_FVG_OPENING_RANGE", session_name="NY PM")
+    db_session.add_all(
+        [
+            PaperTrade(signal_id=sig_am.id, symbol="US100", direction="BUY", status="CLOSED"),
+            PaperTrade(signal_id=sig_pm.id, symbol="US100", direction="SELL", status="CLOSED"),
+        ]
+    )
+    db_session.commit()
+
+    assert trades_today_count(db_session, "US100", "SWEEP_FVG_OPENING_RANGE", "NY Open") == 1
+    assert trades_today_count(db_session, "US100", "SWEEP_FVG_OPENING_RANGE", "NY PM") == 1
+    assert trades_today_count(db_session, "US100", "SWEEP_FVG_OPENING_RANGE") == 2
+
+
+def test_stop_trading_today_scoped_by_session_name_only_cancels_that_window(db_session):
+    from app.paper.auto_paper import is_stopped_today, stop_trading_today
+
+    sig_am = _make_signal(db_session, "US100", "SWEEP_FVG_OPENING_RANGE", session_name="NY Open")
+    sig_pm = _make_signal(db_session, "US100", "SWEEP_FVG_OPENING_RANGE", session_name="NY PM")
+    trade_am = PaperTrade(signal_id=sig_am.id, symbol="US100", direction="BUY", status="PENDING")
+    trade_pm = PaperTrade(signal_id=sig_pm.id, symbol="US100", direction="SELL", status="PENDING")
+    db_session.add_all([trade_am, trade_pm])
+    db_session.commit()
+
+    stop_trading_today(db_session, "US100", "SWEEP_FVG_OPENING_RANGE", "NY Open")
+
+    db_session.refresh(trade_am)
+    db_session.refresh(trade_pm)
+    assert trade_am.status == "CANCELLED"
+    assert trade_pm.status == "PENDING"
+    assert is_stopped_today(db_session, "US100", "SWEEP_FVG_OPENING_RANGE", "NY Open") is True
+    assert is_stopped_today(db_session, "US100", "SWEEP_FVG_OPENING_RANGE", "NY PM") is False
+
+
+def test_session_name_omitted_preserves_strategy_only_scoping(db_session):
+    """Backward-compat guard: today's (Task 8) strategy-only scoping must be unaffected."""
+    from app.paper.auto_paper import get_open_trades
+
+    sig_a = _make_signal(db_session, "US100", "SWEEP_FVG_OPENING_RANGE", session_name="NY Open")
+    sig_b = _make_signal(db_session, "US100", "SWEEP_FVG_PDH_PDL", session_name="PDH/PDL All Day")
+    db_session.add_all(
+        [
+            PaperTrade(signal_id=sig_a.id, symbol="US100", direction="BUY", status="ACTIVE"),
+            PaperTrade(signal_id=sig_b.id, symbol="US100", direction="BUY", status="PENDING"),
+        ]
+    )
+    db_session.commit()
+
+    assert len(get_open_trades(db_session, "US100", "SWEEP_FVG_OPENING_RANGE")) == 1
+    assert len(get_open_trades(db_session, "US100", "SWEEP_FVG_PDH_PDL")) == 1
+    assert len(get_open_trades(db_session, "US100")) == 2

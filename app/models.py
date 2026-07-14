@@ -47,6 +47,7 @@ class Signal(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     symbol: Mapped[str] = mapped_column(String(50), index=True)
     strategy: Mapped[str] = mapped_column(String(50), index=True, default="SWEEP_FVG_OPENING_RANGE")
+    session_name: Mapped[str | None] = mapped_column(String(100), index=True, nullable=True)
     signal_time: Mapped[datetime] = mapped_column(DateTime, index=True)
     direction: Mapped[str] = mapped_column(String(10), index=True)
     setup_type: Mapped[str] = mapped_column(String(100))

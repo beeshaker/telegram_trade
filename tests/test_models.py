@@ -7,7 +7,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.db import Base
-from app.models import EpicConfig
+from app.models import EpicConfig, Signal
 
 
 @pytest.fixture()
@@ -95,3 +95,40 @@ def test_epic_config_default_strategy_is_opening_range(db_session):
     db_session.commit()
     db_session.refresh(cfg)
     assert cfg.strategy == "SWEEP_FVG_OPENING_RANGE"
+
+
+def test_signal_session_name_is_nullable(db_session):
+    from datetime import datetime
+    from app.models import Signal
+
+    signal = Signal(
+        symbol="US100",
+        strategy="SWEEP_FVG_OPENING_RANGE",
+        signal_time=datetime.utcnow(),
+        direction="BUY",
+        setup_type="test",
+    )
+    db_session.add(signal)
+    db_session.commit()
+    db_session.refresh(signal)
+
+    assert signal.session_name is None
+
+
+def test_signal_session_name_can_be_set(db_session):
+    from datetime import datetime
+    from app.models import Signal
+
+    signal = Signal(
+        symbol="US100",
+        strategy="SWEEP_FVG_OPENING_RANGE",
+        session_name="NY PM",
+        signal_time=datetime.utcnow(),
+        direction="BUY",
+        setup_type="test",
+    )
+    db_session.add(signal)
+    db_session.commit()
+    db_session.refresh(signal)
+
+    assert signal.session_name == "NY PM"
