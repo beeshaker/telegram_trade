@@ -202,15 +202,28 @@ def _parse_capital_epics() -> list[str]:
 def ensure_seeded(db: Session) -> None:
     Base.metadata.create_all(bind=db.get_bind())
 
-    if db.query(EpicConfig).count() > 0:
-        return
-
     enabled_epics = set(_parse_capital_epics())
+    existing = {
+        (cfg.epic, cfg.strategy, cfg.session_name)
+        for cfg in db.query(EpicConfig).all()
+    }
+
+    added = False
     for seed in _SEED_EPICS:
+        key = (seed["epic"], seed["strategy"], seed["session_name"])
+        if key in existing:
+            continue
         db.add(EpicConfig(enabled=seed["epic"] in enabled_epics, **seed))
+        added = True
     for seed in _SEED_EPICS_ADDITIONAL:
+        key = (seed["epic"], seed["strategy"], seed["session_name"])
+        if key in existing:
+            continue
         db.add(EpicConfig(enabled=False, **seed))
-    db.commit()
+        added = True
+
+    if added:
+        db.commit()
 
 
 def list_all_epics(db: Session) -> list[EpicConfig]:
@@ -237,6 +250,21 @@ def get_epic_config(db: Session, epic: str, strategy: str, session_name: str) ->
             EpicConfig.strategy == strategy,
             EpicConfig.session_name == session_name,
         )
+        .first()
+    )
+
+
+def get_epic_config_for_strategy(db: Session, epic: str, strategy: str) -> EpicConfig | None:
+    """Return the first (lowest-id / originally-seeded) config row for an epic+strategy.
+
+    Useful for callers like the Telegram /levels command that predate
+    multiple session windows per epic+strategy and just want "the" config.
+    """
+    Base.metadata.create_all(bind=db.get_bind())
+    return (
+        db.query(EpicConfig)
+        .filter(EpicConfig.epic == epic, EpicConfig.strategy == strategy)
+        .order_by(EpicConfig.id.asc())
         .first()
     )
 

@@ -8,7 +8,7 @@ from sqlalchemy.pool import StaticPool
 import app.models  # noqa: F401 - registers EpicConfig with Base.metadata
 from app.config import Settings
 from app.db import Base
-from app.epics import effective_risk, ensure_seeded, upsert_epic_config
+from app.epics import _SEED_EPICS, effective_risk, ensure_seeded, get_epic_config_for_strategy, upsert_epic_config
 from app.models import EpicConfig
 
 
@@ -156,3 +156,46 @@ def test_upsert_epic_config_same_epic_strategy_different_session_creates_new_row
 
     count = db_session.query(EpicConfig).filter(EpicConfig.epic == "US100").count()
     assert count == 2
+
+
+def test_ensure_seeded_adds_missing_rows_to_partially_seeded_db(db_session):
+    Base.metadata.create_all(bind=db_session.get_bind())
+    for seed in _SEED_EPICS:
+        db_session.add(EpicConfig(enabled=False, **seed))
+    db_session.commit()
+    assert db_session.query(EpicConfig).count() == 5
+
+    ensure_seeded(db_session)
+
+    assert db_session.query(EpicConfig).count() == 19
+    # Original rows must not be duplicated.
+    us100_opening_range = (
+        db_session.query(EpicConfig)
+        .filter(EpicConfig.epic == "US100", EpicConfig.strategy == "SWEEP_FVG_OPENING_RANGE", EpicConfig.session_name == "NY Open")
+        .count()
+    )
+    assert us100_opening_range == 1
+
+
+def test_get_epic_config_for_strategy_returns_lowest_id_row(db_session):
+    first = upsert_epic_config(
+        db_session, epic="US100", strategy="SWEEP_FVG_OPENING_RANGE", session_name="NY Open",
+        enabled=True, timezone="America/New_York",
+        range_short_start=dtime(9, 30), range_short_end=dtime(9, 45),
+        range_long_start=dtime(9, 30), range_long_end=dtime(10, 0),
+        trade_start=dtime(9, 45), trade_end=dtime(10, 30),
+        risk_per_trade_percent=None, max_trades_per_day=None, max_losses_per_day=None, params=None,
+    )
+    upsert_epic_config(
+        db_session, epic="US100", strategy="SWEEP_FVG_OPENING_RANGE", session_name="NY PM",
+        enabled=True, timezone="America/New_York",
+        range_short_start=dtime(14, 0), range_short_end=dtime(14, 15),
+        range_long_start=dtime(14, 0), range_long_end=dtime(14, 30),
+        trade_start=dtime(14, 15), trade_end=dtime(15, 0),
+        risk_per_trade_percent=None, max_trades_per_day=None, max_losses_per_day=None, params=None,
+    )
+
+    result = get_epic_config_for_strategy(db_session, "US100", "SWEEP_FVG_OPENING_RANGE")
+
+    assert result.id == first.id
+    assert result.session_name == "NY Open"

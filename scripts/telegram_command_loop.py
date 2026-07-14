@@ -12,7 +12,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.config import get_settings
 from app.db import SessionLocal
-from app.epics import get_epic_config, list_enabled_epics
+from app.epics import STRATEGY_SWEEP_FVG_OPENING_RANGE, get_epic_config_for_strategy, list_enabled_epics
 from app.models import Candle, PaperTrade
 from app.paper.auto_paper import (
     cancel_pending_trades,
@@ -46,7 +46,7 @@ def send(chat_id, message):
 
 
 def levels_text(db, symbol):
-    cfg = get_epic_config(db, symbol)
+    cfg = get_epic_config_for_strategy(db, symbol, STRATEGY_SWEEP_FVG_OPENING_RANGE)
     if cfg is None:
         return "No configuration found for this epic."
 
