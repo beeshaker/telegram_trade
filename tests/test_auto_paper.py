@@ -7,7 +7,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.db import Base
 from app.models import PaperAccount, PaperTrade
-from app.paper.auto_paper import total_open_risk_percent
+from app.paper.auto_paper import monitor_trades, total_open_risk_percent
 
 
 @pytest.fixture()
@@ -150,3 +150,69 @@ def test_stop_trading_today_scoped_by_strategy_only_cancels_that_strategy(db_ses
     assert trade_b.status == "PENDING"
     assert is_stopped_today(db_session, "US100", "SWEEP_FVG_OPENING_RANGE") is True
     assert is_stopped_today(db_session, "US100", "VWAP_MEAN_REVERSION") is False
+
+
+def test_monitor_trades_books_exact_2r_for_fixed_rr_trade(db_session):
+    account = PaperAccount(name="default", currency="USD", starting_balance=1000, balance=1000, equity=1000)
+    db_session.add(account)
+    trade = PaperTrade(
+        symbol="US100", direction="BUY", status="ACTIVE",
+        entry_price=100, stop_loss=98, take_profit=104,
+        risk_amount=10,
+    )
+    db_session.add(trade)
+    db_session.commit()
+
+    events = monitor_trades(db_session, "US100", current_price=104)
+
+    assert len(events) == 1
+    assert events[0]["result"] == "WIN"
+    assert float(events[0]["trade"].r_multiple) == pytest.approx(2.0)
+    assert float(events[0]["trade"].pnl_amount) == pytest.approx(20.0)
+
+
+def test_monitor_trades_books_actual_r_for_variable_target_trade(db_session):
+    account = PaperAccount(name="default", currency="USD", starting_balance=1000, balance=1000, equity=1000)
+    db_session.add(account)
+    # A VWAP-style trade: entry=100.95, stop=110.5 (risk=9.55), target=100.77 (reward=0.18) -> RR ~= 0.019
+    trade = PaperTrade(
+        symbol="US100", direction="SELL", status="ACTIVE",
+        entry_price=100.95, stop_loss=110.5, take_profit=100.77,
+        risk_amount=10,
+    )
+    db_session.add(trade)
+    db_session.commit()
+
+    events = monitor_trades(db_session, "US100", current_price=100.77)
+
+    assert len(events) == 1
+    assert events[0]["result"] == "WIN"
+    expected_r = (100.95 - 100.77) / (110.5 - 100.95)
+    expected_r_rounded = round(expected_r, 4)
+    # r_multiple/pnl_amount are stored as Numeric(10, 2) / Numeric(18, 2) columns, so the
+    # value read back off `trade` after commit+refresh is quantized to 2 decimal places
+    # even though the app rounds to 4 before persisting. Compare against that DB-quantized
+    # precision rather than the raw 4-decimal figure.
+    assert float(events[0]["trade"].r_multiple) == pytest.approx(round(expected_r_rounded, 2))
+    assert float(events[0]["trade"].pnl_amount) == pytest.approx(round(10 * expected_r_rounded, 2))
+    # The critical regression this test guards against: it must NOT be booked as 2.0R.
+    assert float(events[0]["trade"].r_multiple) != pytest.approx(2.0)
+
+
+def test_monitor_trades_loss_is_still_exactly_minus_1r(db_session):
+    account = PaperAccount(name="default", currency="USD", starting_balance=1000, balance=1000, equity=1000)
+    db_session.add(account)
+    trade = PaperTrade(
+        symbol="US100", direction="BUY", status="ACTIVE",
+        entry_price=100, stop_loss=98, take_profit=104,
+        risk_amount=10,
+    )
+    db_session.add(trade)
+    db_session.commit()
+
+    events = monitor_trades(db_session, "US100", current_price=98)
+
+    assert len(events) == 1
+    assert events[0]["result"] == "LOSS"
+    assert float(events[0]["trade"].r_multiple) == pytest.approx(-1.0)
+    assert float(events[0]["trade"].pnl_amount) == pytest.approx(-10.0)

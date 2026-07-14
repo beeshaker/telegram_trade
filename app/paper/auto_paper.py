@@ -271,6 +271,7 @@ def monitor_trades(db: Session, symbol: str, current_price: float) -> list[dict]
         entry = float(trade.entry_price)
         stop = float(trade.stop_loss)
         take = float(trade.take_profit)
+        risk_per_unit = abs(entry - stop)
 
         if trade.status == "PENDING":
             triggered = False
@@ -292,12 +293,14 @@ def monitor_trades(db: Session, symbol: str, current_price: float) -> list[dict]
                 if current_price <= stop:
                     events.append(_close_trade(db, trade, stop, "LOSS", -1.0))
                 elif current_price >= take:
-                    events.append(_close_trade(db, trade, take, "WIN", 2.0))
+                    win_r = (take - entry) / risk_per_unit if risk_per_unit > 0 else 0.0
+                    events.append(_close_trade(db, trade, take, "WIN", round(win_r, 4)))
             else:
                 if current_price >= stop:
                     events.append(_close_trade(db, trade, stop, "LOSS", -1.0))
                 elif current_price <= take:
-                    events.append(_close_trade(db, trade, take, "WIN", 2.0))
+                    win_r = (entry - take) / risk_per_unit if risk_per_unit > 0 else 0.0
+                    events.append(_close_trade(db, trade, take, "WIN", round(win_r, 4)))
 
     return events
 
