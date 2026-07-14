@@ -282,6 +282,60 @@ def epic_config_rows(configs):
     return pd.DataFrame(rows)
 
 
+def strategy_performance_rows():
+    db = SessionLocal()
+    try:
+        closed = (
+            db.query(
+                Signal.strategy.label("strategy"),
+                func.count(PaperTrade.id).label("trades"),
+                func.sum(func.coalesce(PaperTrade.pnl_amount, 0)).label("pnl"),
+                func.avg(PaperTrade.r_multiple).label("avg_r"),
+            )
+            .join(Signal, PaperTrade.signal_id == Signal.id)
+            .filter(PaperTrade.status == "CLOSED")
+            .group_by(Signal.strategy)
+            .all()
+        )
+        closed_map = {row.strategy: row for row in closed}
+
+        wins = dict(
+            db.query(Signal.strategy, func.count(PaperTrade.id))
+            .join(Signal, PaperTrade.signal_id == Signal.id)
+            .filter(PaperTrade.status == "CLOSED", PaperTrade.result == "WIN")
+            .group_by(Signal.strategy)
+            .all()
+        )
+        open_risk = dict(
+            db.query(Signal.strategy, func.sum(func.coalesce(PaperTrade.risk_amount, 0)))
+            .join(Signal, PaperTrade.signal_id == Signal.id)
+            .filter(PaperTrade.status.in_(["PENDING", "ACTIVE"]))
+            .group_by(Signal.strategy)
+            .all()
+        )
+
+        rows = []
+        for strategy in ALL_STRATEGIES:
+            row = closed_map.get(strategy)
+            trades = row.trades if row else 0
+            pnl = float(row.pnl) if row and row.pnl is not None else 0.0
+            avg_r = float(row.avg_r) if row and row.avg_r is not None else None
+            win_count = wins.get(strategy, 0)
+            rows.append(
+                {
+                    "Strategy": strategy,
+                    "Closed trades": trades,
+                    "Win rate %": round(100 * win_count / trades, 1) if trades else 0.0,
+                    "Total P/L": pnl,
+                    "Avg R": round(avg_r, 2) if avg_r is not None else None,
+                    "Open risk $": float(open_risk.get(strategy, 0)),
+                }
+            )
+        return pd.DataFrame(rows)
+    finally:
+        db.close()
+
+
 def price_chart_df(candles, levels, open_trades, overlays):
     rows = []
     for c in candles:
@@ -380,6 +434,9 @@ def win_loss_df(trades):
 
 st.title("📈 NY Open FVG Bot Dashboard")
 st.caption("US100 AUTO_PAPER monitoring, selectable charts, history, levels, and paper balance.")
+
+st.subheader("Strategy performance")
+st.dataframe(strategy_performance_rows(), hide_index=True, use_container_width=True)
 
 with st.expander("⚙️ Epic & Session Management", expanded=False):
     db = SessionLocal()
