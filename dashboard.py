@@ -1,3 +1,4 @@
+import json
 import sys
 import time
 from datetime import datetime, time as dtime, timedelta
@@ -23,7 +24,7 @@ from app.paper.auto_paper import (
     set_paused,
     stop_trading_today,
 )
-from app.epics import CURATED_TIMEZONES, delete_epic_config, list_all_epics, list_enabled_epics, upsert_epic_config
+from app.epics import ALL_STRATEGIES, CURATED_TIMEZONES, delete_epic_config, list_all_epics, list_enabled_epics, upsert_epic_config
 
 load_dotenv()
 
@@ -262,9 +263,10 @@ def epic_config_rows(configs):
         rows.append(
             {
                 "Epic": cfg.epic,
+                "Strategy": cfg.strategy,
+                "Session name": cfg.session_name,
                 "Enabled": cfg.enabled,
                 "Timezone": cfg.timezone,
-                "Session name": cfg.session_name,
                 "Range short start": cfg.range_short_start,
                 "Range short end": cfg.range_short_end,
                 "Range long start": cfg.range_long_start,
@@ -274,6 +276,7 @@ def epic_config_rows(configs):
                 "Risk % override": float(cfg.risk_per_trade_percent) if cfg.risk_per_trade_percent is not None else None,
                 "Max trades override": cfg.max_trades_per_day,
                 "Max losses override": cfg.max_losses_per_day,
+                "Params": json.dumps(cfg.params) if cfg.params else "",
             }
         )
     return pd.DataFrame(rows)
@@ -386,6 +389,7 @@ with st.expander("⚙️ Epic & Session Management", expanded=False):
         db.close()
 
     st.markdown("#### Configured epics")
+    st.caption("Epic, Strategy, and Session name identify a row and can't be edited here — use Add/Remove below to change them.")
     original_df = epic_config_rows(all_configs)
     edited_df = st.data_editor(
         original_df,
@@ -395,9 +399,10 @@ with st.expander("⚙️ Epic & Session Management", expanded=False):
         key="epic_config_editor",
         column_config={
             "Epic": st.column_config.TextColumn("Epic", disabled=True),
+            "Strategy": st.column_config.TextColumn("Strategy", disabled=True),
+            "Session name": st.column_config.TextColumn("Session name", disabled=True),
             "Enabled": st.column_config.CheckboxColumn("Enabled"),
             "Timezone": st.column_config.SelectboxColumn("Timezone", options=CURATED_TIMEZONES),
-            "Session name": st.column_config.TextColumn("Session name"),
             "Range short start": st.column_config.TimeColumn("Range short start"),
             "Range short end": st.column_config.TimeColumn("Range short end"),
             "Range long start": st.column_config.TimeColumn("Range long start"),
@@ -407,11 +412,13 @@ with st.expander("⚙️ Epic & Session Management", expanded=False):
             "Risk % override": st.column_config.NumberColumn("Risk % override", min_value=0.01, max_value=10.0, step=0.01),
             "Max trades override": st.column_config.NumberColumn("Max trades override", min_value=1, step=1),
             "Max losses override": st.column_config.NumberColumn("Max losses override", min_value=1, step=1),
+            "Params": st.column_config.TextColumn("Params (JSON)"),
         },
     )
 
     if st.button("💾 Save changes", key="save_epic_configs"):
         db = SessionLocal()
+        errors = []
         try:
             changed = 0
             for i in range(len(original_df)):
@@ -419,35 +426,46 @@ with st.expander("⚙️ Epic & Session Management", expanded=False):
                 after = edited_df.iloc[i]
                 if before.equals(after):
                     continue
+                try:
+                    params = json.loads(after["Params"]) if str(after["Params"]).strip() else None
+                except json.JSONDecodeError:
+                    errors.append(f"{after['Epic']} / {after['Strategy']} / {after['Session name']}: invalid Params JSON, skipped.")
+                    continue
                 upsert_epic_config(
                     db,
                     epic=after["Epic"],
+                    strategy=after["Strategy"],
+                    session_name=after["Session name"],
                     enabled=bool(after["Enabled"]),
                     timezone=after["Timezone"],
-                    session_name=after["Session name"],
-                    range_short_start=after["Range short start"],
-                    range_short_end=after["Range short end"],
-                    range_long_start=after["Range long start"],
-                    range_long_end=after["Range long end"],
+                    range_short_start=after["Range short start"] if pd.notna(after["Range short start"]) else None,
+                    range_short_end=after["Range short end"] if pd.notna(after["Range short end"]) else None,
+                    range_long_start=after["Range long start"] if pd.notna(after["Range long start"]) else None,
+                    range_long_end=after["Range long end"] if pd.notna(after["Range long end"]) else None,
                     trade_start=after["Trade start"],
                     trade_end=after["Trade end"],
                     risk_per_trade_percent=after["Risk % override"] if pd.notna(after["Risk % override"]) else None,
                     max_trades_per_day=int(after["Max trades override"]) if pd.notna(after["Max trades override"]) else None,
                     max_losses_per_day=int(after["Max losses override"]) if pd.notna(after["Max losses override"]) else None,
+                    params=params,
                 )
                 changed += 1
         finally:
             db.close()
+        for err in errors:
+            st.warning(err)
         st.success(f"Saved {changed} epic config change(s).")
         st.cache_data.clear()
         st.rerun()
 
-    st.markdown("#### Add new epic")
+    st.markdown("#### Add new epic config")
+    st.caption("Range fields are only used by SWEEP_FVG_OPENING_RANGE — they're ignored (stored blank) for other strategies.")
     with st.form("add_epic_form", clear_on_submit=True):
-        add_cols = st.columns(3)
+        add_cols = st.columns(4)
         new_epic = add_cols[0].text_input("Epic code")
-        new_timezone = add_cols[1].selectbox("Timezone", CURATED_TIMEZONES)
-        new_session_name = add_cols[2].text_input("Session name", value="NY Open")
+        new_strategy = add_cols[1].selectbox("Strategy", ALL_STRATEGIES)
+        new_timezone = add_cols[2].selectbox("Timezone", CURATED_TIMEZONES)
+        new_session_name = add_cols[3].text_input("Session name", value="NY Open")
 
         range_cols = st.columns(4)
         new_range_short_start = range_cols[0].time_input("Range short start", value=dtime(9, 30))
@@ -459,14 +477,15 @@ with st.expander("⚙️ Epic & Session Management", expanded=False):
         new_trade_start = trade_cols[0].time_input("Trade start", value=dtime(9, 45))
         new_trade_end = trade_cols[1].time_input("Trade end", value=dtime(10, 30))
 
-        override_cols = st.columns(3)
+        override_cols = st.columns(4)
         new_risk_override_text = override_cols[0].text_input("Risk % override (blank = global default)", value="")
         new_max_trades_override_text = override_cols[1].text_input("Max trades override (blank = global default)", value="")
         new_max_losses_override_text = override_cols[2].text_input("Max losses override (blank = global default)", value="")
+        new_params_text = override_cols[3].text_input("Params JSON (blank = none)", value="")
 
-        new_enabled = st.checkbox("Enabled", value=True)
+        new_enabled = st.checkbox("Enabled", value=False)
 
-        if st.form_submit_button("➕ Add epic"):
+        if st.form_submit_button("➕ Add epic config"):
             if not new_epic.strip():
                 st.warning("Epic code is required.")
             else:
@@ -474,44 +493,50 @@ with st.expander("⚙️ Epic & Session Management", expanded=False):
                     risk_override = float(new_risk_override_text) if new_risk_override_text.strip() else None
                     max_trades_override = int(new_max_trades_override_text) if new_max_trades_override_text.strip() else None
                     max_losses_override = int(new_max_losses_override_text) if new_max_losses_override_text.strip() else None
-                except ValueError:
-                    st.warning("Overrides must be numbers (or left blank).")
+                    params = json.loads(new_params_text) if new_params_text.strip() else None
+                except (ValueError, json.JSONDecodeError):
+                    st.warning("Overrides must be numbers and Params must be valid JSON (or left blank).")
                 else:
+                    range_fields_apply = new_strategy == "SWEEP_FVG_OPENING_RANGE"
                     db = SessionLocal()
                     try:
                         upsert_epic_config(
                             db,
                             epic=new_epic.strip(),
+                            strategy=new_strategy,
+                            session_name=new_session_name,
                             enabled=new_enabled,
                             timezone=new_timezone,
-                            session_name=new_session_name,
-                            range_short_start=new_range_short_start,
-                            range_short_end=new_range_short_end,
-                            range_long_start=new_range_long_start,
-                            range_long_end=new_range_long_end,
+                            range_short_start=new_range_short_start if range_fields_apply else None,
+                            range_short_end=new_range_short_end if range_fields_apply else None,
+                            range_long_start=new_range_long_start if range_fields_apply else None,
+                            range_long_end=new_range_long_end if range_fields_apply else None,
                             trade_start=new_trade_start,
                             trade_end=new_trade_end,
                             risk_per_trade_percent=risk_override,
                             max_trades_per_day=max_trades_override,
                             max_losses_per_day=max_losses_override,
+                            params=params,
                         )
                     finally:
                         db.close()
-                    st.success(f"Added epic {new_epic.strip()}.")
+                    st.success(f"Added {new_epic.strip()} / {new_strategy} / {new_session_name}.")
                     st.cache_data.clear()
                     st.rerun()
 
-    st.markdown("#### Remove epic")
-    remove_epics = st.multiselect("Epics to remove", [cfg.epic for cfg in all_configs], key="remove_epic_select")
+    st.markdown("#### Remove epic config")
+    config_labels = {f"{cfg.epic} | {cfg.strategy} | {cfg.session_name}": cfg for cfg in all_configs}
+    remove_labels = st.multiselect("Configs to remove", list(config_labels.keys()), key="remove_epic_select")
     confirm_remove = st.checkbox("Confirm removal", key="confirm_epic_removal")
-    if st.button("🗑️ Delete selected epics", disabled=not (remove_epics and confirm_remove)):
+    if st.button("🗑️ Delete selected configs", disabled=not (remove_labels and confirm_remove)):
         db = SessionLocal()
         try:
-            for epic in remove_epics:
-                delete_epic_config(db, epic)
+            for label in remove_labels:
+                cfg = config_labels[label]
+                delete_epic_config(db, cfg.epic, cfg.strategy, cfg.session_name)
         finally:
             db.close()
-        st.success(f"Removed {len(remove_epics)} epic(s).")
+        st.success(f"Removed {len(remove_labels)} config(s).")
         st.cache_data.clear()
         st.rerun()
 
