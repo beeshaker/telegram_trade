@@ -136,3 +136,89 @@ def test_run_opening_range_strategy_does_nothing_outside_trade_window(db_session
     )
 
     assert db_session.query(Signal).count() == 0
+
+
+def test_run_pdh_pdl_strategy_creates_signal_and_trade(db_session):
+    from scripts.run_auto_paper_once import run_pdh_pdl_strategy
+
+    previous_day = date(2026, 6, 1)
+    session_date = date(2026, 6, 2)
+
+    _insert_candle(db_session, "US100", "M1", datetime.combine(previous_day, dtime(12, 0), tzinfo=NY), 105, 95, 100)
+
+    m5_specs = [
+        (dtime(9, 45), 104, 99, 103),
+        (dtime(9, 50), 106, 102, 104),
+        (dtime(9, 55), 107, 101, 103),
+        (dtime(10, 0), 108, 102, 104),
+        (dtime(10, 5), 109, 105, 106),
+        (dtime(10, 10), 107, 98, 99),
+        (dtime(10, 15), 100, 95, 96),
+    ]
+    last_candle_time = None
+    for t, h, l, c in m5_specs:
+        local_dt = datetime.combine(session_date, t, tzinfo=NY)
+        _insert_candle(db_session, "US100", "M5", local_dt, h, l, c)
+        last_candle_time = local_dt.astimezone(UTC).replace(tzinfo=None)
+    db_session.commit()
+
+    account = PaperAccount(name="default", currency="USD", starting_balance=1000, balance=1000, equity=1000)
+    db_session.add(account)
+    db_session.commit()
+    db_session.refresh(account)
+
+    cfg = EpicConfig(
+        epic="US100",
+        strategy="SWEEP_FVG_PDH_PDL",
+        enabled=True,
+        timezone="America/New_York",
+        session_name="PDH/PDL All Day",
+        trade_start=dtime(0, 5),
+        trade_end=dtime(23, 55),
+    )
+
+    settings = Settings(risk_per_trade_percent=0.5, max_trades_per_day=1, max_losses_per_day=2, min_risk_reward=2.0)
+    latest_candle = SimpleNamespace(candle_time=last_candle_time)
+    latest_local = datetime.combine(session_date, dtime(10, 15), tzinfo=NY)
+
+    run_pdh_pdl_strategy(
+        db_session, cfg, settings, sweep_buffer=0.0, stop_buffer=0.5,
+        account=account, latest_candle=latest_candle, latest_local=latest_local, session_date=session_date,
+    )
+
+    signal = db_session.query(Signal).one()
+    assert signal.strategy == "SWEEP_FVG_PDH_PDL"
+    assert signal.direction == "SELL"
+    assert float(signal.opening_range_high) == pytest.approx(105.0)
+    assert float(signal.opening_range_low) == pytest.approx(95.0)
+    assert float(signal.entry_price) == pytest.approx(102.5)
+    assert float(signal.stop_loss) == pytest.approx(106.5)
+    assert float(signal.take_profit) == pytest.approx(94.5)
+
+    trade = db_session.query(PaperTrade).one()
+    assert trade.signal_id == signal.id
+
+
+def test_run_pdh_pdl_strategy_does_nothing_when_previous_day_range_missing(db_session):
+    from scripts.run_auto_paper_once import run_pdh_pdl_strategy
+
+    session_date = date(2026, 6, 2)
+    account = PaperAccount(name="default", currency="USD", starting_balance=1000, balance=1000, equity=1000)
+    db_session.add(account)
+    db_session.commit()
+    db_session.refresh(account)
+
+    cfg = EpicConfig(
+        epic="US100", strategy="SWEEP_FVG_PDH_PDL", enabled=True, timezone="America/New_York",
+        session_name="PDH/PDL All Day", trade_start=dtime(0, 5), trade_end=dtime(23, 55),
+    )
+    settings = Settings()
+    latest_candle = SimpleNamespace(candle_time=datetime(2026, 6, 2, 14, 15))
+    latest_local = datetime.combine(session_date, dtime(10, 15), tzinfo=NY)
+
+    run_pdh_pdl_strategy(
+        db_session, cfg, settings, sweep_buffer=0.0, stop_buffer=0.5,
+        account=account, latest_candle=latest_candle, latest_local=latest_local, session_date=session_date,
+    )
+
+    assert db_session.query(Signal).count() == 0
