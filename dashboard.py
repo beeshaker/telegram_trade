@@ -9,10 +9,12 @@ import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 from sqlalchemy import func
+from sqlalchemy.orm import joinedload
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from app.config import get_settings
 from app.db import SessionLocal
 from app.models import Candle, PaperAccount, PaperTrade, Signal
 from app.paper.auto_paper import (
@@ -23,6 +25,7 @@ from app.paper.auto_paper import (
     reset_paper_account,
     set_paused,
     stop_trading_today,
+    total_open_risk_percent,
 )
 from app.epics import ALL_STRATEGIES, CURATED_TIMEZONES, delete_epic_config, list_all_epics, list_enabled_epics, upsert_epic_config
 
@@ -85,12 +88,14 @@ def load_dashboard_data(symbol: str, candle_limit: int):
         )
         open_trades = (
             db.query(PaperTrade)
+            .options(joinedload(PaperTrade.signal))
             .filter(PaperTrade.status.in_(["PENDING", "ACTIVE"]))
             .order_by(PaperTrade.created_at.asc())
             .all()
         )
         all_trades = (
             db.query(PaperTrade)
+            .options(joinedload(PaperTrade.signal))
             .order_by(PaperTrade.created_at.desc())
             .limit(500)
             .all()
@@ -138,6 +143,7 @@ def load_dashboard_data(symbol: str, candle_limit: int):
             "pnl_today": pnl_today,
             "paused": paused,
             "stopped_today": stopped_today,
+            "open_risk_percent": total_open_risk_percent(db, account) if account else 0.0,
         }
     finally:
         db.close()
@@ -206,6 +212,7 @@ def trade_rows(trades):
                 "ID": t.id,
                 "Created NY": utc_naive_to_ny(t.created_at).strftime("%Y-%m-%d %H:%M") if t.created_at else "-",
                 "Symbol": t.symbol,
+                "Strategy": t.signal.strategy if t.signal else None,
                 "Direction": t.direction,
                 "Status": t.status,
                 "Entry": float(t.entry_price) if t.entry_price is not None else None,
@@ -228,6 +235,7 @@ def signal_rows(signals):
                 "ID": s.id,
                 "Time NY": utc_naive_to_ny(s.signal_time).strftime("%Y-%m-%d %H:%M") if s.signal_time else "-",
                 "Symbol": s.symbol,
+                "Strategy": s.strategy,
                 "Direction": s.direction,
                 "Setup": s.setup_type,
                 "Status": s.status,
@@ -696,13 +704,14 @@ latest_m1 = data["latest_m1"]
 latest_price = float(latest_m1.close) if latest_m1 else None
 latest_ny = utc_naive_to_ny(latest_m1.candle_time).strftime("%Y-%m-%d %H:%M:%S %Z") if latest_m1 else "No candle"
 
-col1, col2, col3, col4, col5, col6 = st.columns(6)
+col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
 col1.metric("Paper balance", fmt_money(account.balance if account else 0))
 col2.metric("Latest price", fmt_num(latest_price))
 col3.metric("Open trades", len(data["open_trades"]))
 col4.metric("Trades today", data["trades_today"])
 col5.metric("Wins / Losses", f"{data['wins_today']} / {data['losses_today']}")
 col6.metric("P/L today", fmt_money(data["pnl_today"]))
+col7.metric("Open risk", f"{data['open_risk_percent']:.2f}% / {get_settings().max_portfolio_risk_percent:.1f}%")
 
 status_col1, status_col2, status_col3 = st.columns(3)
 status_col1.info(f"Latest NY candle: {latest_ny}")
