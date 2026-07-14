@@ -45,6 +45,31 @@ class RiskManager:
             risk_percent=risk_percent,
         )
 
+    def build_trade_plan_with_target(
+        self, symbol: str, direction: Literal["BUY", "SELL"], entry_price: float, stop_loss: float, take_profit: float
+    ) -> TradePlan:
+        if direction == "BUY":
+            risk = entry_price - stop_loss
+            reward = take_profit - entry_price
+        else:
+            risk = stop_loss - entry_price
+            reward = entry_price - take_profit
+
+        if risk <= 0:
+            raise ValueError("Invalid trade plan: risk must be greater than zero.")
+        if reward <= 0:
+            raise ValueError("Invalid trade plan: reward must be greater than zero.")
+
+        return TradePlan(
+            symbol=symbol,
+            direction=direction,
+            entry_price=round(entry_price, 5),
+            stop_loss=round(stop_loss, 5),
+            take_profit=round(take_profit, 5),
+            risk_reward=round(reward / risk, 4),
+            risk_percent=self.settings.risk_per_trade_percent,
+        )
+
     def is_valid(self, plan: TradePlan) -> bool:
         if plan.risk_reward < self.settings.min_risk_reward:
             return False
