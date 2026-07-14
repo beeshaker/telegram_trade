@@ -34,7 +34,7 @@ def db_session(monkeypatch):
 def test_ensure_seeded_is_idempotent(db_session):
     ensure_seeded(db_session)
     count_after_first = db_session.query(EpicConfig).count()
-    assert count_after_first == 5
+    assert count_after_first == 19
 
     ensure_seeded(db_session)
     count_after_second = db_session.query(EpicConfig).count()
@@ -77,9 +77,10 @@ def test_upsert_epic_config_creates_then_updates(db_session):
     created = upsert_epic_config(
         db_session,
         epic="TESTEPIC",
+        strategy="SWEEP_FVG_OPENING_RANGE",
+        session_name="Test Session",
         enabled=True,
         timezone="UTC",
-        session_name="Test Session",
         range_short_start=dtime(9, 0),
         range_short_end=dtime(9, 15),
         range_long_start=dtime(9, 0),
@@ -89,6 +90,7 @@ def test_upsert_epic_config_creates_then_updates(db_session):
         risk_per_trade_percent=None,
         max_trades_per_day=None,
         max_losses_per_day=None,
+        params=None,
     )
 
     assert created.id is not None
@@ -97,9 +99,10 @@ def test_upsert_epic_config_creates_then_updates(db_session):
     updated = upsert_epic_config(
         db_session,
         epic="TESTEPIC",
+        strategy="SWEEP_FVG_OPENING_RANGE",
+        session_name="Test Session",
         enabled=False,
         timezone="UTC",
-        session_name="Updated Session",
         range_short_start=dtime(9, 0),
         range_short_end=dtime(9, 15),
         range_long_start=dtime(9, 0),
@@ -109,12 +112,47 @@ def test_upsert_epic_config_creates_then_updates(db_session):
         risk_per_trade_percent=1.0,
         max_trades_per_day=5,
         max_losses_per_day=2,
+        params=None,
     )
 
     assert updated.id == created.id
     assert updated.enabled is False
-    assert updated.session_name == "Updated Session"
     assert float(updated.risk_per_trade_percent) == 1.0
 
     count = db_session.query(EpicConfig).filter(EpicConfig.epic == "TESTEPIC").count()
     assert count == 1
+
+
+def test_ensure_seeded_new_strategies_default_disabled(db_session, monkeypatch):
+    monkeypatch.setenv("CAPITAL_EPICS", "US100,UK100,GOLD,USDJPY,NATURALGAS")
+    ensure_seeded(db_session)
+
+    pdh_pdl_rows = db_session.query(EpicConfig).filter(EpicConfig.strategy == "SWEEP_FVG_PDH_PDL").all()
+    assert len(pdh_pdl_rows) == 5
+    assert all(not row.enabled for row in pdh_pdl_rows)
+
+    vwap_rows = db_session.query(EpicConfig).filter(EpicConfig.strategy == "VWAP_MEAN_REVERSION").all()
+    assert len(vwap_rows) == 5
+    assert all(not row.enabled for row in vwap_rows)
+
+
+def test_upsert_epic_config_same_epic_strategy_different_session_creates_new_row(db_session):
+    upsert_epic_config(
+        db_session, epic="US100", strategy="SWEEP_FVG_OPENING_RANGE", session_name="NY Open",
+        enabled=True, timezone="America/New_York",
+        range_short_start=dtime(9, 30), range_short_end=dtime(9, 45),
+        range_long_start=dtime(9, 30), range_long_end=dtime(10, 0),
+        trade_start=dtime(9, 45), trade_end=dtime(10, 30),
+        risk_per_trade_percent=None, max_trades_per_day=None, max_losses_per_day=None, params=None,
+    )
+    upsert_epic_config(
+        db_session, epic="US100", strategy="SWEEP_FVG_OPENING_RANGE", session_name="NY PM",
+        enabled=True, timezone="America/New_York",
+        range_short_start=dtime(14, 0), range_short_end=dtime(14, 15),
+        range_long_start=dtime(14, 0), range_long_end=dtime(14, 30),
+        trade_start=dtime(14, 15), trade_end=dtime(15, 0),
+        risk_per_trade_percent=None, max_trades_per_day=None, max_losses_per_day=None, params=None,
+    )
+
+    count = db_session.query(EpicConfig).filter(EpicConfig.epic == "US100").count()
+    assert count == 2
