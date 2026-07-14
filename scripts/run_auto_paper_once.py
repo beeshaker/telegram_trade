@@ -12,7 +12,13 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from app.alerts.telegram_alerts import TelegramAlert, format_signal_alert
 from app.config import get_settings
 from app.db import SessionLocal
-from app.epics import STRATEGY_SWEEP_FVG_OPENING_RANGE, STRATEGY_SWEEP_FVG_PDH_PDL, effective_risk, list_enabled_epics
+from app.epics import (
+    STRATEGY_SWEEP_FVG_OPENING_RANGE,
+    STRATEGY_SWEEP_FVG_PDH_PDL,
+    STRATEGY_VWAP_MEAN_REVERSION,
+    effective_risk,
+    list_enabled_epics,
+)
 from app.models import Candle, Signal
 from app.paper.auto_paper import (
     create_trade_from_signal,
@@ -32,6 +38,7 @@ from app.risk.risk_manager import RiskManager
 from app.strategy.fvg_detector import detect_fvg_at
 from app.strategy.previous_day_range import previous_day_range_window
 from app.strategy.sweep_detector import detect_sweep
+from app.strategy.vwap import calculate_vwap_bands
 
 load_dotenv()
 
@@ -365,9 +372,118 @@ def run_pdh_pdl_strategy(db, cfg, settings, sweep_buffer, stop_buffer, account, 
     print(f"[{epic}/{cfg.strategy}] Auto paper trade created.")
 
 
+def run_vwap_strategy(db, cfg, settings, sweep_buffer, stop_buffer, account, latest_candle, latest_local, session_date):
+    epic = cfg.epic
+    TZ = ZoneInfo(cfg.timezone)
+    trade_start = cfg.trade_start
+    trade_end = cfg.trade_end
+
+    if latest_local.time() < trade_start:
+        print(f"[{epic}/{cfg.strategy}] Before {trade_start}. Strategy not active yet.")
+        return
+    if latest_local.time() > trade_end:
+        print(f"[{epic}/{cfg.strategy}] After {trade_end}. No new trades.")
+        return
+
+    scan_start_local = datetime.combine(session_date, trade_start, tzinfo=TZ)
+    scan_start_utc = local_to_utc_naive(scan_start_local)
+    scan_end_utc = latest_candle.candle_time
+    candles = get_candles(db, epic, "M5", scan_start_utc, scan_end_utc)
+
+    if len(candles) < 5:
+        print(f"[{epic}/{cfg.strategy}] Not enough M5 candles to scan.")
+        return
+
+    deviation_threshold = (cfg.params or {}).get("deviation_threshold", 1.5)
+    bands = calculate_vwap_bands(candles, deviation_threshold)
+
+    found = None
+    for i, candle in enumerate(candles):
+        band = bands[i]
+        if band is None:
+            continue
+        sweep = detect_sweep(candle, band["high"], band["low"], buffer=sweep_buffer)
+        if not sweep:
+            continue
+        for j in range(max(i + 2, 2), len(candles)):
+            fvg = detect_fvg_at(candles, j)
+            if fvg and fvg.direction == sweep.direction:
+                found = (sweep, fvg, candles[j], band)
+                break
+        if found:
+            break
+
+    if not found:
+        print(f"[{epic}/{cfg.strategy}] No VWAP fade setup found.")
+        return
+
+    sweep, fvg, fvg_candle, band = found
+    risk_percent, _, _ = effective_risk(cfg, settings)
+
+    entry_price = fvg.midpoint
+    target_price = band["vwap"]
+    stop_loss = sweep.sweep_price + stop_buffer if sweep.direction == "SELL" else sweep.sweep_price - stop_buffer
+
+    try:
+        plan = RiskManager().build_trade_plan_with_target(epic, sweep.direction, entry_price, stop_loss, target_price)
+    except ValueError as exc:
+        print(f"[{epic}/{cfg.strategy}] Invalid VWAP trade plan ({exc}). Skipping.")
+        return
+
+    if not portfolio_risk_available(db, account, settings, risk_percent):
+        print(f"[{epic}/{cfg.strategy}] Portfolio risk ceiling reached. Skipping trade.")
+        return
+
+    setup_type = f"{cfg.session_name} VWAP Fade AUTO_PAPER"
+    existing_signal = (
+        db.query(Signal)
+        .filter(
+            Signal.symbol == epic,
+            Signal.strategy == cfg.strategy,
+            Signal.direction == sweep.direction,
+            Signal.signal_time == fvg_candle["candle_time"],
+            Signal.setup_type == setup_type,
+        )
+        .first()
+    )
+    if existing_signal:
+        print(f"[{epic}/{cfg.strategy}] Signal already exists. No duplicate.")
+        return
+
+    signal = Signal(
+        symbol=epic,
+        strategy=cfg.strategy,
+        signal_time=fvg_candle["candle_time"],
+        direction=sweep.direction,
+        setup_type=setup_type,
+        status="DETECTED",
+        # Reusing opening_range_high/low to store the VWAP band in effect at signal time.
+        opening_range_high=band["high"],
+        opening_range_low=band["low"],
+        sweep_level=sweep.sweep_level,
+        sweep_price=sweep.sweep_price,
+        fvg_low=fvg.fvg_low,
+        fvg_high=fvg.fvg_high,
+        entry_price=plan.entry_price,
+        stop_loss=plan.stop_loss,
+        take_profit=plan.take_profit,
+        risk_reward=plan.risk_reward,
+        mode="AUTO_PAPER",
+    )
+    db.add(signal)
+    db.commit()
+    db.refresh(signal)
+
+    trade = create_trade_from_signal(db, signal, risk_percent)
+    account = ensure_paper_account(db)
+    notify_trade_created(signal, trade, account, risk_percent)
+    print(f"[{epic}/{cfg.strategy}] Auto paper trade created.")
+
+
 STRATEGY_HANDLERS = {
     STRATEGY_SWEEP_FVG_OPENING_RANGE: run_opening_range_strategy,
     STRATEGY_SWEEP_FVG_PDH_PDL: run_pdh_pdl_strategy,
+    STRATEGY_VWAP_MEAN_REVERSION: run_vwap_strategy,
 }
 
 

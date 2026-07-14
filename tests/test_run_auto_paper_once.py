@@ -222,3 +222,92 @@ def test_run_pdh_pdl_strategy_does_nothing_when_previous_day_range_missing(db_se
     )
 
     assert db_session.query(Signal).count() == 0
+
+
+def test_run_vwap_strategy_creates_signal_and_trade_on_fade(db_session):
+    from scripts.run_auto_paper_once import run_vwap_strategy
+
+    session_date = date(2026, 6, 1)
+
+    m5_specs = [
+        (dtime(9, 45), 100, 100, 100),
+        (dtime(9, 50), 100, 100, 100),
+        (dtime(9, 55), 100, 100, 100),
+        (dtime(10, 0), 100, 100, 100),
+        (dtime(10, 5), 110, 101, 100.5),
+        (dtime(10, 10), 101, 99, 100),
+        (dtime(10, 15), 100.9, 97, 98.5),
+    ]
+    last_candle_time = None
+    for t, h, l, c in m5_specs:
+        local_dt = datetime.combine(session_date, t, tzinfo=NY)
+        _insert_candle(db_session, "US100", "M5", local_dt, h, l, c, v=1)
+        last_candle_time = local_dt.astimezone(UTC).replace(tzinfo=None)
+    db_session.commit()
+
+    account = PaperAccount(name="default", currency="USD", starting_balance=1000, balance=1000, equity=1000)
+    db_session.add(account)
+    db_session.commit()
+    db_session.refresh(account)
+
+    cfg = EpicConfig(
+        epic="US100",
+        strategy="VWAP_MEAN_REVERSION",
+        enabled=True,
+        timezone="America/New_York",
+        session_name="NY Midday VWAP",
+        trade_start=dtime(9, 45),
+        trade_end=dtime(13, 30),
+        params={"deviation_threshold": 1.5},
+    )
+
+    settings = Settings(risk_per_trade_percent=0.5, max_trades_per_day=1, max_losses_per_day=2, min_risk_reward=2.0)
+    latest_candle = SimpleNamespace(candle_time=last_candle_time)
+    latest_local = datetime.combine(session_date, dtime(10, 15), tzinfo=NY)
+
+    run_vwap_strategy(
+        db_session, cfg, settings, sweep_buffer=0.0, stop_buffer=0.5,
+        account=account, latest_candle=latest_candle, latest_local=latest_local, session_date=session_date,
+    )
+
+    signal = db_session.query(Signal).one()
+    assert signal.strategy == "VWAP_MEAN_REVERSION"
+    assert signal.direction == "SELL"
+    assert float(signal.entry_price) == pytest.approx(100.95, abs=0.01)
+    assert float(signal.stop_loss) == pytest.approx(110.5, abs=0.01)
+    assert float(signal.take_profit) == pytest.approx(100.77, abs=0.01)
+    assert float(signal.take_profit) < float(signal.entry_price)
+
+    trade = db_session.query(PaperTrade).one()
+    assert trade.signal_id == signal.id
+
+
+def test_run_vwap_strategy_does_nothing_with_too_few_candles(db_session):
+    from scripts.run_auto_paper_once import run_vwap_strategy
+
+    session_date = date(2026, 6, 1)
+    for t in [dtime(9, 45), dtime(9, 50), dtime(9, 55)]:
+        local_dt = datetime.combine(session_date, t, tzinfo=NY)
+        _insert_candle(db_session, "US100", "M5", local_dt, 100, 100, 100, v=1)
+    db_session.commit()
+
+    account = PaperAccount(name="default", currency="USD", starting_balance=1000, balance=1000, equity=1000)
+    db_session.add(account)
+    db_session.commit()
+    db_session.refresh(account)
+
+    cfg = EpicConfig(
+        epic="US100", strategy="VWAP_MEAN_REVERSION", enabled=True, timezone="America/New_York",
+        session_name="NY Midday VWAP", trade_start=dtime(9, 45), trade_end=dtime(13, 30),
+        params={"deviation_threshold": 1.5},
+    )
+    settings = Settings()
+    latest_candle = SimpleNamespace(candle_time=datetime(2026, 6, 1, 13, 55))
+    latest_local = datetime.combine(session_date, dtime(9, 55), tzinfo=NY)
+
+    run_vwap_strategy(
+        db_session, cfg, settings, sweep_buffer=0.0, stop_buffer=0.5,
+        account=account, latest_candle=latest_candle, latest_local=latest_local, session_date=session_date,
+    )
+
+    assert db_session.query(Signal).count() == 0
