@@ -5,6 +5,7 @@ from datetime import datetime, date
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models import BotState, Candle, PaperAccount, PaperTrade, Signal
@@ -38,6 +39,18 @@ def ensure_paper_account(db: Session) -> PaperAccount:
     db.commit()
     db.refresh(account)
     return account
+
+
+def total_open_risk_percent(db: Session, account: PaperAccount) -> float:
+    open_risk = (
+        db.query(func.coalesce(func.sum(PaperTrade.risk_amount), 0))
+        .filter(PaperTrade.status.in_(["PENDING", "ACTIVE"]))
+        .scalar()
+    )
+    balance = float(account.balance)
+    if balance <= 0:
+        return 0.0
+    return float(open_risk) / balance * 100
 
 
 def reset_paper_account(db: Session) -> PaperAccount:

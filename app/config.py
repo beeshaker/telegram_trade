@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     max_trades_per_day: int = Field(default=1, ge=1)
     max_losses_per_day: int = Field(default=2, ge=1)
     min_risk_reward: float = Field(default=2.0, ge=0.1)
+    max_portfolio_risk_percent: float = Field(default=3.0, ge=0.1, le=100)
 
     telegram_enabled: bool = False
     telegram_bot_token: Optional[str] = None
