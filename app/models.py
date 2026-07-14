@@ -46,6 +46,7 @@ class Signal(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     symbol: Mapped[str] = mapped_column(String(50), index=True)
+    strategy: Mapped[str] = mapped_column(String(50), index=True, default="SWEEP_FVG_OPENING_RANGE")
     signal_time: Mapped[datetime] = mapped_column(DateTime, index=True)
     direction: Mapped[str] = mapped_column(String(10), index=True)
     setup_type: Mapped[str] = mapped_column(String(100))
@@ -140,20 +141,23 @@ class BotState(Base):
 
 class EpicConfig(Base):
     __tablename__ = "epic_configs"
+    __table_args__ = (UniqueConstraint("epic", "strategy", "session_name", name="uq_epic_strategy_session"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    epic: Mapped[str] = mapped_column(String(50), unique=True, index=True)
+    epic: Mapped[str] = mapped_column(String(50), index=True)
+    strategy: Mapped[str] = mapped_column(String(50), index=True, default="SWEEP_FVG_OPENING_RANGE")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     timezone: Mapped[str] = mapped_column(String(50))
     session_name: Mapped[str] = mapped_column(String(100))
-    range_short_start: Mapped[time] = mapped_column(Time)
-    range_short_end: Mapped[time] = mapped_column(Time)
-    range_long_start: Mapped[time] = mapped_column(Time)
-    range_long_end: Mapped[time] = mapped_column(Time)
+    range_short_start: Mapped[time | None] = mapped_column(Time, nullable=True)
+    range_short_end: Mapped[time | None] = mapped_column(Time, nullable=True)
+    range_long_start: Mapped[time | None] = mapped_column(Time, nullable=True)
+    range_long_end: Mapped[time | None] = mapped_column(Time, nullable=True)
     trade_start: Mapped[time] = mapped_column(Time)
     trade_end: Mapped[time] = mapped_column(Time)
     risk_per_trade_percent: Mapped[float | None] = mapped_column(Numeric(5, 2), nullable=True)
     max_trades_per_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_losses_per_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    params: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
